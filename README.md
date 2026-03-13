@@ -2,7 +2,7 @@
 
 **Easily manage multiple OpenAI Codex CLI accounts by swapping only the saved login credentials.**
 
-Based on the original [codex-cli-account-switcher](https://github.com/bashar94/codex-cli-account-switcher).
+Shoutout to the original [codex-cli-account-switcher](https://github.com/bashar94/codex-cli-account-switcher) for the initial idea.
 
 The official [OpenAI Codex CLI](https://github.com/openai/codex) does **not support multi-account login**.  
 Users must manually re-authenticate every time they switch accounts — a painful process for developers who use multiple OpenAI accounts (for example, personal vs work).
