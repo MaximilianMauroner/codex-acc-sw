@@ -32,8 +32,10 @@ sudo ln -sf "$(pwd)/codex-accounts.sh" /usr/local/bin/acc-sw
 ```
 acc-sw list
 acc-sw current
+acc-sw refresh
 acc-sw save <name>
 acc-sw add <name>
+acc-sw <name>
 acc-sw switch <name>
 acc-sw rename <old-name> <new-name>
 ```
@@ -48,12 +50,19 @@ codex login   # then run:
 acc-sw save tazrin
 
 # Switch between accounts
+acc-sw bashar
+
+# Equivalent explicit form
 acc-sw switch bashar
+
+# Try to fetch fresh usage for the active account
+acc-sw refresh
 
 # Fix a mistaken saved name
 acc-sw rename main third
 ```
-`acc-sw list` also shows the latest locally seen current and weekly remaining usage for each account.
+`acc-sw list` also shows the latest known current and weekly remaining usage for each account.
+The active `[current]` marker is derived from the live `~/.codex/auth.json` when possible, not just the saved state file.
 ## 📁 Data Locations
 Codex stores its login credentials in `~/.codex/auth.json`.
 This script saves one `auth.json` file per account and swaps only that file, leaving the rest of your `~/.codex` data alone.
@@ -69,6 +78,7 @@ It’s safe to use — your Codex configuration, history, sessions, and logs are
 ## ⚙️ Requirements
 - macOS / Linux
 - `bash`
+- `python3`
 - Codex CLI installed:
   - macOS: `brew install codex`
   - Linux: use your package manager or follow the [Codex CLI docs](https://developers.openai.com/codex/cli/)
@@ -77,8 +87,12 @@ It’s safe to use — your Codex configuration, history, sessions, and logs are
 - Supports unlimited accounts — name-based switching.
 - Automatically backs up the current account credentials before changing.
 - Shows the current and previous account states.
-- Shows the latest locally seen current and weekly remaining usage in `acc-sw list`.
+- Shows the latest known current and weekly remaining usage in `acc-sw list`.
+- `switch`, `current`, and `list` do a short best-effort live usage refresh for the active account and fall back to cached usage if that probe fails.
+- `acc-sw refresh` runs a longer explicit live probe for the currently active account.
+- Live usage refresh uses the active `~/.codex/auth.json` tokens against ChatGPT's usage endpoint instead of relying only on session logs.
+- Avoids assigning pre-switch usage snapshots to a freshly switched account until that account has produced its own newer Codex session activity.
 - Works cross-platform: macOS, Linux, WSL.
-- Simple shell-only dependencies (`bash`).
+- Lightweight local dependencies (`bash`, `python3`).
 - Helpful prompts if Codex isn’t installed or logged in yet.
 - You can safely share this across machines (just copy `~/codex-data`).
