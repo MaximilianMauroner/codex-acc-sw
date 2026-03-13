@@ -6,11 +6,11 @@ This repo lives in the same problem space as the original [codex-cli-account-swi
 
 The official [OpenAI Codex CLI](https://github.com/openai/codex) still does not support multi-account login. If you use separate personal, work, or testing accounts, switching normally means replacing `~/.codex/auth.json` by hand or re-authenticating every time.
 
-I also opened:
-- [openai/codex#4432](https://github.com/openai/codex/issues/4432) for native multi-account support
-- [openai/codex#4457](https://github.com/openai/codex/pull/4457) with an implementation attempt
+Relevant background from the original project:
+- the original author raised [openai/codex#4432](https://github.com/openai/codex/issues/4432) for native multi-account support
+- the original author also opened [openai/codex#4457](https://github.com/openai/codex/pull/4457) with an implementation attempt
 
-Until something like that lands upstream, this script is the local workaround I use.
+This repo is a separate hobby project built from that starting point and adapted into its own local workflow.
 
 ## Status
 
