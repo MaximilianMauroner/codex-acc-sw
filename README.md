@@ -28,9 +28,9 @@ What should work, but is less verified:
 - Saves one Codex login per account name
 - Switches accounts by replacing only `~/.codex/auth.json`
 - Leaves the rest of `~/.codex` alone
-- Tracks current and previous account names
+- Tracks the active account name
 - Shows current and weekly usage percentages per saved account
-- Tries a short live usage refresh for the active account on `list`, `current`, and `switch`
+- Fetches live usage on every `list`, `current`, `switch`, and `refresh`
 - Supports a shorthand switch command: `acc-sw <name>`
 
 ## Requirements
@@ -41,12 +41,10 @@ What should work, but is less verified:
 - At least one successful `codex login`
 - A writable home directory for:
   - `~/.codex`
-  - `~/codex-data`
-  - `~/.codex-switch`
 
-For the live usage refresh features:
+For the live usage features:
 - working network access
-- valid auth tokens in the active `~/.codex/auth.json`
+- valid auth tokens in the relevant saved `*.auth.json` files
 
 Install Codex CLI if needed:
 - macOS: `brew install codex`
@@ -88,10 +86,10 @@ acc-sw rename <old-name> <new-name>
 What they do:
 
 - `acc-sw list`
-  Lists saved accounts and shows the latest known current and weekly usage remaining.
+  Lists saved accounts and fetches live current and weekly usage remaining for each one.
 
 - `acc-sw current`
-  Shows the active account and the previously active one.
+  Shows the active account and its live usage.
 
 - `acc-sw refresh`
   Runs a longer manual live refresh for the active account's usage.
@@ -151,29 +149,27 @@ acc-sw refresh
 The script only swaps the active Codex auth file:
 
 - active account: `~/.codex/auth.json`
-- saved accounts: `~/codex-data/<name>.auth.json`
+- saved accounts: `~/.codex/accounts/<name>.auth.json`
 
 It does not replace your broader Codex home directory, so your config, history, sessions, and logs stay in place.
 
-For usage reporting, it keeps local cached snapshots and also tries to fetch a newer live snapshot for the currently active account when useful.
+For usage reporting, it calls the usage API directly whenever it shows usage data. `list` fetches each saved account live from its saved auth file, while `current`, `switch`, and `refresh` fetch live from the active `~/.codex/auth.json`.
 
 ## Data stored locally
 
 | Path | Purpose |
 | --- | --- |
 | `~/.codex/auth.json` | Active Codex account credentials |
-| `~/codex-data/<name>.auth.json` | Saved account credentials |
-| `~/.codex-switch/state` | Current and previous account names |
-| `~/.codex-switch/usage.json` | Cached usage snapshots per account |
-| `~/.codex-switch/usage-refresh.json` | Refresh timing metadata |
+| `~/.codex/accounts/<name>.auth.json` | Saved account credentials |
+| `~/.codex/switch/state` | Active account state used for switching |
 
 ## Notes and caveats
 
 - Only the auth file is swapped. This is intentional.
-- `list`, `current`, and `switch` do a short best-effort live usage refresh for the active account and fall back to cached data if that refresh fails.
+- `list`, `current`, `switch`, and `refresh` do not read from a local usage cache. They fetch live usage data every time.
+- `list` fetches each saved account directly from its saved auth file, so it can show up-to-date data for accounts that are not currently active.
 - `refresh` uses a longer timeout than the automatic refresh path.
-- The active `[current]` marker is derived from the live `~/.codex/auth.json` when possible, not only from the saved state file.
-- The script avoids assigning stale pre-switch usage snapshots to a newly switched account until there is newer activity for that account.
+- The active `[active]` marker is derived from the live `~/.codex/auth.json` when possible, not only from the saved state file.
 - If `~/.codex/auth.json` is missing when saving or adding, the script will tell you to log in first.
 - Since this is a hobby project, expect rough edges and verify behavior before relying on it in a critical workflow.
 
