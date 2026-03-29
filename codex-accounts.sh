@@ -3,21 +3,26 @@ set -euo pipefail
 
 # codex-accounts.sh — manage multiple Codex CLI accounts
 # Storage layout:
-#   Auths:  ~/codex-data/<account>.auth.json
-#   State:  ~/.codex-switch/state   (CURRENT=..., PREVIOUS=...)
+#   Auths:  ~/.codex/accounts/<account>.auth.json
+#   State:  ~/.codex/switch/state   (CURRENT=..., PREVIOUS=...)
 
 CODENAME="codex"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(
+  python3 - "${BASH_SOURCE[0]}" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 CODEX_HOME="${HOME}/.codex"
 AUTH_FILE="${CODEX_HOME}/auth.json"
-DATA_DIR="${HOME}/codex-data"
-STATE_DIR="${HOME}/.codex-switch"
+DATA_DIR="${CODEX_HOME}/accounts"
+STATE_DIR="${CODEX_HOME}/switch"
 STATE_FILE="${STATE_DIR}/state"
-USAGE_FILE="${STATE_DIR}/usage.json"
-USAGE_REFRESH_FILE="${STATE_DIR}/usage-refresh.json"
 USAGE_AUTO_REFRESH_TIMEOUT_SECONDS=3
 USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS=8
-USAGE_REFRESH_COOLDOWN_SECONDS=30
 
 # ------------- utils -------------
 die() { echo "[ERR] $*" >&2; exit 1; }
@@ -30,7 +35,7 @@ is_help_flag() {
 }
 
 ensure_dirs() {
-  mkdir -p "$DATA_DIR" "$STATE_DIR" "$CODEX_HOME"
+  mkdir -p "$CODEX_HOME" "$DATA_DIR" "$STATE_DIR"
 }
 
 load_state() {
@@ -44,145 +49,6 @@ load_state() {
 save_state() {
   local cur="$1" prev="$2"
   printf "CURRENT=%q\nPREVIOUS=%q\n" "$cur" "$prev" > "$STATE_FILE"
-}
-
-latest_rate_limits_json() {
-  python3 - "$CODEX_HOME" "${1:-0}" <<'PY'
-import glob
-import json
-import os
-import sys
-
-codex_home = sys.argv[1]
-min_mtime = float(sys.argv[2] or 0)
-patterns = [
-    os.path.join(codex_home, "sessions", "**", "*.jsonl"),
-    os.path.join(codex_home, "archived_sessions", "*.jsonl"),
-]
-
-paths = []
-for pattern in patterns:
-    paths.extend(glob.glob(pattern, recursive=True))
-paths = [p for p in paths if os.path.isfile(p)]
-if min_mtime > 0:
-    paths = [p for p in paths if os.path.getmtime(p) >= min_mtime]
-paths.sort(key=os.path.getmtime, reverse=True)
-
-def build_snapshot(event):
-    payload = event.get("payload") or {}
-    rate_limits = payload.get("rate_limits") or {}
-    primary = rate_limits.get("primary") or {}
-    secondary = rate_limits.get("secondary") or {}
-    primary_used = primary.get("used_percent")
-    secondary_used = secondary.get("used_percent")
-    if primary_used is None and secondary_used is None:
-        return None
-    return {
-        "last_seen_at": event.get("timestamp"),
-        "current_remaining_percent": None if primary_used is None else max(0.0, 100.0 - float(primary_used)),
-        "weekly_remaining_percent": None if secondary_used is None else max(0.0, 100.0 - float(secondary_used)),
-        "current_window_minutes": primary.get("window_minutes"),
-        "weekly_window_minutes": secondary.get("window_minutes"),
-        "current_resets_at": primary.get("resets_at"),
-        "weekly_resets_at": secondary.get("resets_at"),
-    }
-
-for path in paths[:50]:
-    latest = None
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                if '"type":"token_count"' not in line and '"type": "token_count"' not in line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                payload = event.get("payload") or {}
-                if payload.get("type") != "token_count":
-                    continue
-                snapshot = build_snapshot(event)
-                if snapshot is not None:
-                    latest = snapshot
-    except OSError:
-        continue
-
-    if latest is not None:
-        print(json.dumps(latest, separators=(",", ":")))
-        sys.exit(0)
-
-sys.exit(1)
-PY
-}
-
-auth_file_mtime() {
-  python3 - "$AUTH_FILE" <<'PY'
-import os
-import sys
-
-path = sys.argv[1]
-if not os.path.exists(path):
-    print("0")
-else:
-    print(f"{os.path.getmtime(path):.6f}")
-PY
-}
-
-mark_usage_fresh() {
-  local name="$1"
-  local auth_mtime="$2"
-
-  python3 - "$USAGE_REFRESH_FILE" "$name" "$auth_mtime" <<'PY'
-import json
-import os
-import sys
-import time
-
-path, name, auth_mtime = sys.argv[1], sys.argv[2], sys.argv[3]
-data = {}
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle) or {}
-    except (OSError, json.JSONDecodeError):
-        data = {}
-
-data[name] = {
-    "fresh_auth_mtime": auth_mtime,
-    "refreshed_at": time.time(),
-}
-
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-PY
-}
-
-rename_usage_refresh_state() {
-  local old_name="$1"
-  local new_name="$2"
-
-  python3 - "$USAGE_REFRESH_FILE" "$old_name" "$new_name" <<'PY'
-import json
-import os
-import sys
-
-path, old_name, new_name = sys.argv[1], sys.argv[2], sys.argv[3]
-if not os.path.exists(path):
-    sys.exit(0)
-
-try:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-except (OSError, json.JSONDecodeError):
-    sys.exit(0)
-
-if old_name not in data:
-    sys.exit(0)
-
-data[new_name] = data.pop(old_name)
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-PY
 }
 
 account_id_for_auth_path() {
@@ -239,10 +105,11 @@ resolved_current_account_name() {
 }
 
 fetch_live_usage_snapshot() {
-  local timeout_seconds="${1:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
+  local auth_path="${1:-$AUTH_FILE}"
+  local timeout_seconds="${2:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
   python3 \
     "$SCRIPT_DIR/scripts/fetch_codex_rate_limits.py" \
-    "$AUTH_FILE" \
+    "$auth_path" \
     "$timeout_seconds"
 }
 
@@ -257,133 +124,17 @@ sync_active_auth_to_saved_account() {
   chmod 600 "$dest"
 }
 
-write_usage_snapshot() {
-  local name="$1"
-  local snapshot_json="$2"
+format_usage_snapshot_json() {
+  local snapshot_json="$1"
+  local status="${2:-live}"
 
-  python3 - "$USAGE_FILE" "$name" "$snapshot_json" <<'PY'
+  python3 - "$snapshot_json" "$status" <<'PY'
+import datetime as dt
 import json
-import os
 import sys
 
-path, name, snapshot_raw = sys.argv[1], sys.argv[2], sys.argv[3]
-snapshot = json.loads(snapshot_raw)
-data = {}
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        data = {}
-
-current = data.get(name) or {}
-if snapshot.get("last_seen_at", "") >= current.get("last_seen_at", ""):
-    data[name] = snapshot
-
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-PY
-}
-
-refresh_usage_cache_for_current_account() {
-  local name="$1"
-  [[ -z "${name:-}" ]] && return 0
-  [[ -f "$AUTH_FILE" ]] || return 0
-
-  local min_mtime
-  min_mtime="$(auth_file_mtime)"
-
-  local snapshot_json
-  if snapshot_json="$(latest_rate_limits_json "$min_mtime" 2>/dev/null)"; then
-    write_usage_snapshot "$name" "$snapshot_json" >/dev/null 2>&1 || true
-  fi
-}
-
-rename_usage_snapshot() {
-  local old_name="$1"
-  local new_name="$2"
-
-  python3 - "$USAGE_FILE" "$old_name" "$new_name" <<'PY'
-import json
-import os
-import sys
-
-path, old_name, new_name = sys.argv[1], sys.argv[2], sys.argv[3]
-if not os.path.exists(path):
-    sys.exit(0)
-
-try:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-except (OSError, json.JSONDecodeError):
-    sys.exit(0)
-
-if old_name not in data:
-    sys.exit(0)
-
-data[new_name] = data.pop(old_name)
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-PY
-}
-
-usage_freshness_label() {
-  local name="$1"
-  local is_active="${2:-0}"
-
-  if [[ "$is_active" != "1" ]]; then
-    echo "cached"
-    return 0
-  fi
-
-  local auth_mtime
-  auth_mtime="$(auth_file_mtime)"
-
-  python3 - "$USAGE_REFRESH_FILE" "$name" "$auth_mtime" "$USAGE_REFRESH_COOLDOWN_SECONDS" <<'PY'
-import json
-import os
-import sys
-import time
-
-path, name, auth_mtime, cooldown = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
-if not os.path.exists(path):
-    print("cached")
-    sys.exit(0)
-
-try:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle) or {}
-except (OSError, json.JSONDecodeError):
-    print("cached")
-    sys.exit(0)
-
-entry = data.get(name) or {}
-same_auth = str(entry.get("fresh_auth_mtime", "")) == str(auth_mtime)
-refreshed_at = float(entry.get("refreshed_at", 0) or 0)
-if same_auth and (time.time() - refreshed_at < cooldown):
-    print("fresh")
-else:
-    print("cached")
-PY
-}
-
-format_usage_suffix() {
-  local name="$1"
-  local freshness="${2:-}"
-
-  python3 - "$USAGE_FILE" "$name" "$freshness" <<'PY'
-import json
-import os
-import sys
-
-path, name, freshness = sys.argv[1], sys.argv[2], sys.argv[3]
-entry = {}
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            entry = (json.load(handle) or {}).get(name) or {}
-    except (OSError, json.JSONDecodeError):
-        entry = {}
+snapshot = json.loads(sys.argv[1])
+status = sys.argv[2]
 
 def fmt(value):
     if value is None:
@@ -393,54 +144,63 @@ def fmt(value):
         return f"{int(value)}%"
     return f"{value:.1f}%"
 
+def fmt_ts(value):
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    local_value = parsed.astimezone()
+    return local_value.strftime("%b %d, %Y %H:%M")
+
 parts = [
-    f"current: {fmt(entry.get('current_remaining_percent'))}",
-    f"weekly: {fmt(entry.get('weekly_remaining_percent'))}",
+    f"window: {fmt(snapshot.get('current_remaining_percent'))}",
+    f"week: {fmt(snapshot.get('weekly_remaining_percent'))}",
 ]
 
-last_seen = entry.get("last_seen_at")
+last_seen = fmt_ts(snapshot.get("last_seen_at"))
 if last_seen:
-    parts.append(f"last seen: {last_seen}")
+    parts.append(f"updated: {last_seen}")
 
-if freshness:
-    parts.append(freshness)
+if status:
+    parts.append(status)
 
 print(" | ".join(parts))
 PY
 }
 
-refresh_usage_for_active_account() {
+fetch_and_format_usage_for_auth_path() {
   local name="$1"
-  local timeout_seconds="${2:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
-  [[ -n "${name:-}" ]] || return 1
-  [[ -f "$AUTH_FILE" ]] || return 1
+  local auth_path="$2"
+  local timeout_seconds="${3:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
 
-  local auth_mtime
-  auth_mtime="$(auth_file_mtime)"
-
-  local tmp_snapshot
-  tmp_snapshot="$(mktemp "${TMPDIR:-/tmp}/acc-sw-rate-limits.XXXXXX")"
-
-  if ! fetch_live_usage_snapshot "$timeout_seconds" >"$tmp_snapshot" 2>/dev/null; then
-    rm -f "$tmp_snapshot"
+  local snapshot_json
+  if ! snapshot_json="$(fetch_live_usage_snapshot "$auth_path" "$timeout_seconds" 2>/dev/null)"; then
+    echo "window: n/a | week: n/a | live fetch failed"
     return 1
   fi
 
-  local snapshot_json
-  snapshot_json="$(cat "$tmp_snapshot")"
-  rm -f "$tmp_snapshot"
+  if [[ "$auth_path" == "$AUTH_FILE" ]]; then
+    sync_active_auth_to_saved_account "$name" >/dev/null 2>&1 || true
+  fi
 
-  write_usage_snapshot "$name" "$snapshot_json" >/dev/null 2>&1 || true
-  sync_active_auth_to_saved_account "$name" >/dev/null 2>&1 || true
-  mark_usage_fresh "$name" "$auth_mtime" >/dev/null 2>&1 || true
+  format_usage_snapshot_json "$snapshot_json" "live"
 }
 
-refresh_usage_for_active_display() {
+display_usage_for_saved_account() {
   local name="$1"
-  [[ -n "${name:-}" ]] || return 0
+  local timeout_seconds="${2:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
+  local active_current="${3:-}"
 
-  refresh_usage_cache_for_current_account "$name"
-  refresh_usage_for_active_account "$name" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" >/dev/null 2>&1 || true
+  local auth_path
+  if [[ -n "${active_current:-}" && "$name" == "$active_current" ]]; then
+    auth_path="$AUTH_FILE"
+  else
+    auth_path="$(auth_path_for "$name")"
+  fi
+
+  fetch_and_format_usage_for_auth_path "$name" "$auth_path" "$timeout_seconds"
 }
 
 auth_path_for() {
@@ -531,7 +291,6 @@ cmd_list() {
   load_state
   local active_current
   active_current="$(resolved_current_account_name)"
-  refresh_usage_for_active_display "$active_current"
 
   shopt -s nullglob
   local any=0
@@ -542,15 +301,9 @@ cmd_list() {
     base="${base%.auth.json}"
     label=" - ${base}"
     if [[ "${active_current:-}" == "$base" ]]; then
-      label="${label} [current]"
-    elif [[ "${PREVIOUS:-}" == "$base" ]]; then
-      label="${label} [previous]"
+      label="${label} [active]"
     fi
-    local freshness="cached"
-    if [[ "${active_current:-}" == "$base" ]]; then
-      freshness="$(usage_freshness_label "$base" 1)"
-    fi
-    usage="$(format_usage_suffix "$base" "$freshness")"
+    usage="$(display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" || true)"
     echo "${label} | ${usage}"
   done
   if [[ $any -eq 0 ]]; then
@@ -562,16 +315,12 @@ cmd_current() {
   load_state
   local active_current
   active_current="$(resolved_current_account_name)"
-  refresh_usage_for_active_display "$active_current"
   if [[ -n "${active_current:-}" ]]; then
-    local freshness
-    freshness="$(usage_freshness_label "$active_current" 1)"
-    echo "Current:  $active_current | $(format_usage_suffix "$active_current" "$freshness")"
+    local usage
+    usage="$(display_usage_for_saved_account "$active_current" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" || true)"
+    echo "Active:   $active_current | ${usage}"
   else
-    echo "Current:  (unknown — no state recorded yet)"
-  fi
-  if [[ -n "${PREVIOUS:-}" ]]; then
-    echo "Previous: $PREVIOUS"
+    echo "Active:   (unknown — no state recorded yet)"
   fi
 }
 
@@ -604,7 +353,6 @@ EOF
   PREVIOUS="${prior_current:-}"
   CURRENT="$name"
   save_state "$CURRENT" "$PREVIOUS"
-  refresh_usage_cache_for_current_account "$CURRENT"
 }
 
 cmd_add() {
@@ -659,7 +407,6 @@ EOF
     if [[ -z "${active_current:-}" ]]; then
       active_current="$(prompt_account_name)"
     fi
-    refresh_usage_cache_for_current_account "$active_current"
     backup_current_to "$active_current" 1
   fi
 
@@ -669,8 +416,9 @@ EOF
   PREVIOUS="${active_current:-${CURRENT:-}}"
   CURRENT="$target"
   save_state "$CURRENT" "$PREVIOUS"
-  refresh_usage_for_active_display "$CURRENT"
-  echo "Switched to ${CURRENT} | $(format_usage_suffix "$CURRENT" "$(usage_freshness_label "$CURRENT" 1)")"
+  local usage
+  usage="$(display_usage_for_saved_account "$CURRENT" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$CURRENT" || true)"
+  echo "Switched to ${CURRENT} | ${usage}"
 }
 
 cmd_refresh() {
@@ -691,13 +439,14 @@ EOF
   [[ -n "${active_current:-}" ]] || die "No active account found."
   assert_auth_present_or_hint
 
-  if refresh_usage_for_active_account "$active_current" "$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS"; then
-    echo "Refreshed ${active_current} | $(format_usage_suffix "$active_current" "fresh")"
+  local usage
+  if usage="$(display_usage_for_saved_account "$active_current" "$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS" "$active_current")"; then
+    echo "Refreshed ${active_current} | ${usage}"
     return
   fi
 
-  refresh_usage_cache_for_current_account "$active_current"
-  echo "Refresh failed for ${active_current} | $(format_usage_suffix "$active_current" "cached")"
+  echo "Refresh failed for ${active_current} | ${usage}"
+  return 1
 }
 
 cmd_rename() {
@@ -735,8 +484,6 @@ EOF
     PREVIOUS="$new_name"
   fi
   save_state "${CURRENT:-}" "${PREVIOUS:-}"
-  rename_usage_snapshot "$old_name" "$new_name" >/dev/null 2>&1 || true
-  rename_usage_refresh_state "$old_name" "$new_name" >/dev/null 2>&1 || true
 
   ok "Renamed '${old_name}' to '${new_name}'."
 }
@@ -750,10 +497,10 @@ USAGE
       Shortcut for '$0 switch <name>' when <name> matches a saved account.
 
   $0 list
-      Show all saved accounts (from ${DATA_DIR}) with cached current/weekly remaining usage.
+      Show all saved accounts (from ${DATA_DIR}) with live current/weekly remaining usage.
 
   $0 current
-      Show current and previous accounts from the state.
+      Show the active account with live usage.
 
   $0 refresh
       Try to fetch a fresh usage snapshot for the active account.
@@ -777,9 +524,10 @@ USAGE
 
 NOTES
   - Only auth.json is saved and restored. Your config, history, sessions, and logs stay in place.
-  - Usage values come from the latest Codex rate-limit snapshot seen locally for each account.
-  - switch/current/list do a short best-effort live refresh for the active account, then fall back to cached usage.
-  - Run '$0 refresh' when you want a longer explicit live probe for the active account.
+  - Usage values are fetched live from the usage API every time they are shown.
+  - list fetches live usage for each saved account using that account's saved auth file.
+  - current and switch fetch live usage for the active account using ~/.codex/auth.json.
+  - refresh uses a longer timeout for the same live API path.
   - If ~/.codex/auth.json is missing when saving/adding, you'll be prompted to login first.
   - Install Codex if needed:  brew install codex
 EOF

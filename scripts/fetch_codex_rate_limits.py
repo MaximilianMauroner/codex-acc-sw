@@ -156,14 +156,22 @@ def fetch_usage(auth: dict, timeout_seconds: float) -> tuple[int, dict]:
     if not access_token:
         raise RuntimeError("missing access token")
 
+    cache_bust = int(utcnow().timestamp() * 1000)
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {access_token}",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
 
-    return request_json("GET", USAGE_URL, timeout_seconds, headers)
+    return request_json(
+        "GET",
+        f"{USAGE_URL}?_={cache_bust}",
+        timeout_seconds,
+        headers,
+    )
 
 
 def build_snapshot(payload: dict) -> dict:
