@@ -67,6 +67,32 @@ def parse_iso8601(value: str | None) -> dt.datetime | None:
         return None
 
 
+def normalize_reset_at(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return (
+            dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    if isinstance(value, str):
+        parsed = parse_iso8601(value)
+        if parsed is not None:
+            return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        try:
+            return (
+                dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except ValueError:
+            return None
+    return None
+
+
 def should_refresh(auth: dict) -> bool:
     tokens = auth.get("tokens") or {}
     access_token = tokens.get("access_token")
@@ -187,9 +213,12 @@ def build_snapshot(payload: dict) -> dict:
 
     current_window_seconds = primary.get("limit_window_seconds")
     weekly_window_seconds = secondary.get("limit_window_seconds")
+    current_reset_at = primary.get("reset_at", primary.get("resets_at"))
+    weekly_reset_at = secondary.get("reset_at", secondary.get("resets_at"))
 
     return {
         "last_seen_at": now_iso(),
+        "plan_type": payload.get("plan_type"),
         "current_remaining_percent": None
         if current_used is None
         else max(0.0, 100.0 - float(current_used)),
@@ -202,8 +231,8 @@ def build_snapshot(payload: dict) -> dict:
         "weekly_window_minutes": None
         if weekly_window_seconds is None
         else float(weekly_window_seconds) / 60.0,
-        "current_resets_at": primary.get("resets_at"),
-        "weekly_resets_at": secondary.get("resets_at"),
+        "current_resets_at": normalize_reset_at(current_reset_at),
+        "weekly_resets_at": normalize_reset_at(weekly_reset_at),
     }
 
 

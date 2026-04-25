@@ -21,6 +21,7 @@ AUTH_FILE="${CODEX_HOME}/auth.json"
 DATA_DIR="${CODEX_HOME}/accounts"
 STATE_DIR="${CODEX_HOME}/switch"
 STATE_FILE="${STATE_DIR}/state"
+CONFIG_FILE="${STATE_DIR}/config"
 USAGE_AUTO_REFRESH_TIMEOUT_SECONDS=3
 USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS=8
 
@@ -49,6 +50,52 @@ load_state() {
 save_state() {
   local cur="$1" prev="$2"
   printf "CURRENT=%q\nPREVIOUS=%q\n" "$cur" "$prev" > "$STATE_FILE"
+}
+
+load_config() {
+  DISPLAY_RESET_STYLE="human"
+  DISPLAY_SHOW_PLAN="0"
+  DISPLAY_SHOW_UPDATED="0"
+  DISPLAY_SHOW_NEXT_RESET="1"
+  DISPLAY_SHOW_LIVE="0"
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE" || true
+  fi
+
+  case "${DISPLAY_RESET_STYLE:-}" in
+    human|normal) ;;
+    *) DISPLAY_RESET_STYLE="human" ;;
+  esac
+
+  local key
+  for key in DISPLAY_SHOW_PLAN DISPLAY_SHOW_UPDATED DISPLAY_SHOW_NEXT_RESET DISPLAY_SHOW_LIVE; do
+    case "${!key:-}" in
+      0|1) ;;
+      *) printf -v "$key" "0" ;;
+    esac
+  done
+}
+
+save_config() {
+  printf \
+    "DISPLAY_RESET_STYLE=%q\nDISPLAY_SHOW_PLAN=%q\nDISPLAY_SHOW_UPDATED=%q\nDISPLAY_SHOW_NEXT_RESET=%q\nDISPLAY_SHOW_LIVE=%q\n" \
+    "$DISPLAY_RESET_STYLE" \
+    "$DISPLAY_SHOW_PLAN" \
+    "$DISPLAY_SHOW_UPDATED" \
+    "$DISPLAY_SHOW_NEXT_RESET" \
+    "$DISPLAY_SHOW_LIVE" \
+    > "$CONFIG_FILE"
+}
+
+normalize_toggle() {
+  local value="${1:-}"
+  case "$value" in
+    1|on|true|yes|y) echo 1 ;;
+    0|off|false|no|n) echo 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 account_id_for_auth_path() {
@@ -127,14 +174,27 @@ sync_active_auth_to_saved_account() {
 format_usage_snapshot_json() {
   local snapshot_json="$1"
   local status="${2:-live}"
+  load_config
 
-  python3 - "$snapshot_json" "$status" <<'PY'
+  python3 - \
+    "$snapshot_json" \
+    "$status" \
+    "$DISPLAY_RESET_STYLE" \
+    "$DISPLAY_SHOW_PLAN" \
+    "$DISPLAY_SHOW_UPDATED" \
+    "$DISPLAY_SHOW_NEXT_RESET" \
+    "$DISPLAY_SHOW_LIVE" <<'PY'
 import datetime as dt
 import json
 import sys
 
 snapshot = json.loads(sys.argv[1])
 status = sys.argv[2]
+reset_style = sys.argv[3]
+show_plan = sys.argv[4] == "1"
+show_updated = sys.argv[5] == "1"
+show_next_reset = sys.argv[6] == "1"
+show_live = sys.argv[7] == "1"
 
 def fmt(value):
     if value is None:
@@ -147,27 +207,88 @@ def fmt(value):
 def fmt_ts(value):
     if not value:
         return None
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
+    parsed = None
+    if isinstance(value, (int, float)):
+        parsed = dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+    elif isinstance(value, str):
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+            except ValueError:
+                return value
+    if parsed is None:
+        return None
     local_value = parsed.astimezone()
     return local_value.strftime("%b %d, %Y %H:%M")
 
-parts = [
-    f"window: {fmt(snapshot.get('current_remaining_percent'))}",
-    f"week: {fmt(snapshot.get('weekly_remaining_percent'))}",
-]
+
+def fmt_relative_reset(value):
+    if not value:
+        return None
+    parsed = None
+    if isinstance(value, (int, float)):
+        parsed = dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+    elif isinstance(value, str):
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+            except ValueError:
+                return None
+    if parsed is None:
+        return None
+
+    now = dt.datetime.now(dt.timezone.utc)
+    remaining_seconds = max(0, int((parsed - now).total_seconds()))
+    if remaining_seconds < 60:
+        return "<1m"
+
+    days, remainder = divmod(remaining_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return "".join(parts)
+
+plan_type = snapshot.get("plan_type")
+is_free_plan = plan_type == "free"
+parts = []
+
+if is_free_plan:
+    parts.append("free plan")
+else:
+    parts.extend(
+        [
+            f"window: {fmt(snapshot.get('current_remaining_percent'))}",
+            f"week: {fmt(snapshot.get('weekly_remaining_percent'))}",
+        ]
+    )
+
+if show_plan and plan_type and not is_free_plan:
+    parts.append(f"plan: {plan_type}")
 
 last_seen = fmt_ts(snapshot.get("last_seen_at"))
-if last_seen:
+if show_updated and last_seen:
     parts.append(f"updated: {last_seen}")
 
-current_resets = fmt_ts(snapshot.get("current_resets_at"))
-if current_resets:
+current_reset_value = snapshot.get("current_resets_at")
+current_resets = (
+    fmt_relative_reset(current_reset_value)
+    if reset_style == "human"
+    else fmt_ts(current_reset_value)
+)
+if show_next_reset and current_resets and not is_free_plan:
     parts.append(f"next reset: {current_resets}")
 
-if status:
+if show_live and status:
     parts.append(status)
 
 print(" | ".join(parts))
@@ -532,55 +653,129 @@ EOF
   ok "Removed '${name}'."
 }
 
+cmd_configure() {
+  ensure_dirs
+  load_config
+
+  if [[ $# -eq 0 ]] || is_help_flag "${1:-}"; then
+    cat <<EOF
+Usage: $0 configure
+       $0 configure reset <human|normal>
+       $0 configure show <plan|updated|next-reset|live> <on|off>
+       $0 configure preset <default|verbose>
+
+Current config
+  reset style: ${DISPLAY_RESET_STYLE}
+  show plan: ${DISPLAY_SHOW_PLAN}
+  show updated: ${DISPLAY_SHOW_UPDATED}
+  show next reset: ${DISPLAY_SHOW_NEXT_RESET}
+  show live: ${DISPLAY_SHOW_LIVE}
+
+Notes
+  - default output is compact: window, week, and next reset only.
+  - free accounts collapse to 'free plan' by default.
+  - reset 'human' shows relative values like 4h45m.
+  - reset 'normal' shows absolute timestamps like Apr 25, 2026 20:27.
+EOF
+    return
+  fi
+
+  local subcmd="${1:-}"
+  case "$subcmd" in
+    reset)
+      local style="${2:-}"
+      case "$style" in
+        human|normal)
+          DISPLAY_RESET_STYLE="$style"
+          save_config
+          ok "Reset style set to '${style}'."
+          ;;
+        *)
+          die "Usage: $0 configure reset <human|normal>"
+          ;;
+      esac
+      ;;
+    show)
+      local field="${2:-}"
+      local raw_value="${3:-}"
+      local value
+      value="$(normalize_toggle "$raw_value")" || die "Usage: $0 configure show <plan|updated|next-reset|live> <on|off>"
+      case "$field" in
+        plan) DISPLAY_SHOW_PLAN="$value" ;;
+        updated) DISPLAY_SHOW_UPDATED="$value" ;;
+        next-reset) DISPLAY_SHOW_NEXT_RESET="$value" ;;
+        live) DISPLAY_SHOW_LIVE="$value" ;;
+        *) die "Usage: $0 configure show <plan|updated|next-reset|live> <on|off>" ;;
+      esac
+      save_config
+      ok "Set '${field}' to '${raw_value}'."
+      ;;
+    preset)
+      local preset="${2:-}"
+      case "$preset" in
+        default)
+          DISPLAY_RESET_STYLE="human"
+          DISPLAY_SHOW_PLAN="0"
+          DISPLAY_SHOW_UPDATED="0"
+          DISPLAY_SHOW_NEXT_RESET="1"
+          DISPLAY_SHOW_LIVE="0"
+          ;;
+        verbose)
+          DISPLAY_RESET_STYLE="human"
+          DISPLAY_SHOW_PLAN="1"
+          DISPLAY_SHOW_UPDATED="1"
+          DISPLAY_SHOW_NEXT_RESET="1"
+          DISPLAY_SHOW_LIVE="1"
+          ;;
+        *)
+          die "Usage: $0 configure preset <default|verbose>"
+          ;;
+      esac
+      save_config
+      ok "Applied '${preset}' preset."
+      ;;
+    *)
+      die "Unknown configure command. See '$0 configure --help'."
+      ;;
+  esac
+}
+
 cmd_help() {
   cat <<EOF
-codex-accounts.sh — manage multiple Codex CLI accounts
+Codex Account Switcher
 
-USAGE
-  $0 <name>
-      Shortcut for '$0 switch <name>' when <name> matches a saved account.
+Swap between saved Codex accounts and show live usage for each one.
 
-  $0 list
-      Show all saved accounts (from ${DATA_DIR}) with live current/weekly remaining usage
-      and the next current-window reset time when available.
+Usage: $0 [COMMAND]
+       $0 <ACCOUNT_NAME>
 
-  $0 current
-      Show the active account with live usage and the next current-window reset time.
+Commands:
+  list         Show saved accounts with live usage
+  current      Show the active account with live usage
+  configure    Configure display style and optional fields
+  save [NAME]  Save the current login under a name
+  add <NAME>   Prepare to log into a new account
+  rename <OLD_NAME> <NEW_NAME>
+               Rename a saved account
+  remove <NAME>
+               Remove a saved account
+  help         Show this help
 
-  $0 refresh
-      Try to fetch a fresh usage snapshot for the active account and show the next
-      current-window reset time.
+Arguments:
+  <ACCOUNT_NAME>  Shortcut for 'switch <ACCOUNT_NAME>' when the account exists
 
-  $0 save [<name>]
-      Save the current ~/.codex/auth.json into ${DATA_DIR}/<name>.auth.json.
-      If <name> is omitted, you'll be prompted.
+Display:
+  Default output is compact: window, week, and next reset.
+  Free-tier accounts show as 'free plan' by default.
 
-  $0 add <name>
-      Prepare to add a new account:
-        - backs up current auth (prompting for its name if unknown),
-        - removes ~/.codex/auth.json so you can run 'codex login',
-        - after login, run: $0 save <name>
+Storage:
+  Active auth: ~/.codex/auth.json
+  Saved auths: ${DATA_DIR}/<name>.auth.json
 
-  $0 switch <name>
-      Switch to an existing saved account by replacing ~/.codex/auth.json.
-      Backs up the current auth first, then activates <name>.
-
-  $0 rename <old-name> <new-name>
-      Rename a saved account and update saved state references.
-
-  $0 remove <name>
-      Remove a saved account.
-      Refuses to remove the currently active account.
-
-NOTES
-  - Only auth.json is saved and restored. Your config, history, sessions, and logs stay in place.
-  - Usage values are fetched live from the usage API every time they are shown.
-  - list fetches live usage for each saved account using that account's saved auth file.
-  - current and switch fetch live usage for the active account using ~/.codex/auth.json.
-  - When available, output includes the next current-window reset time from the API.
-  - refresh uses a longer timeout for the same live API path.
-  - If ~/.codex/auth.json is missing when saving/adding, you'll be prompted to login first.
-  - Install Codex if needed:  brew install codex
+Notes:
+  Usage is fetched live whenever it is shown.
+  list reads each saved account from its saved auth file.
+  current and account switching read the active account from ~/.codex/auth.json.
 EOF
 }
 
@@ -593,10 +788,9 @@ main() {
   case "$cmd" in
     list)    cmd_list "$@";;
     current) cmd_current "$@";;
-    refresh) cmd_refresh "$@";;
+    configure|config) cmd_configure "$@";;
     save)    cmd_save "$@";;
     add)     cmd_add "$@";;
-    switch)  cmd_switch "$@";;
     rename)  cmd_rename "$@";;
     remove|rm|delete) cmd_remove "$@";;
     help|--help|-h) cmd_help;;
