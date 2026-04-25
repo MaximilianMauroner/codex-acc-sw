@@ -7,6 +7,7 @@ set -euo pipefail
 #   State:  ~/.codex/switch/state   (CURRENT=..., PREVIOUS=...)
 
 CODENAME="codex"
+COMMAND_NAME="codex-account-switch"
 SCRIPT_PATH="$(
   python3 - "${BASH_SOURCE[0]}" <<'PY'
 import os
@@ -387,7 +388,7 @@ activate_saved_account() {
     return
   fi
 
-  die "No saved account named '${name}'. Use '$0 list' to see options."
+  die "No saved account named '${name}'. Use '${COMMAND_NAME} list' to see options."
 }
 
 resolve_current_name_or_prompt() {
@@ -453,10 +454,10 @@ cmd_save() {
   # Save only the currently logged-in account auth under a name.
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 save [<name>]
+Usage: ${COMMAND_NAME} save [NAME]
 
-Save the current ~/.codex/auth.json into ${DATA_DIR}/<name>.auth.json.
-If <name> is omitted, you'll be prompted.
+Save the current ~/.codex/auth.json into ${DATA_DIR}/NAME.auth.json.
+If NAME is omitted, you will be prompted.
 EOF
     return
   fi
@@ -484,7 +485,7 @@ cmd_add() {
   # Prepare for a new login without touching config, history, logs, or sessions.
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 add <new-account-name>
+Usage: ${COMMAND_NAME} add NAME
 
 Backs up the current auth if needed, removes ~/.codex/auth.json,
 then lets you run '${CODENAME} login' for the new account.
@@ -496,7 +497,7 @@ EOF
   resolve_current_name_or_prompt
 
   local newname="${1:-}"
-  [[ -z "$newname" ]] && die "Usage: $0 add <new-account-name>"
+  [[ -z "$newname" ]] && die "Usage: ${COMMAND_NAME} add NAME"
 
   if [[ -f "$AUTH_FILE" ]]; then
     note "Removing current auth.json to prepare login for '${newname}'..."
@@ -504,14 +505,14 @@ EOF
   fi
 
   ok "Ready. Now run: ${CODENAME} login  (to authenticate '${newname}')"
-  echo "After login completes, run: $0 save ${newname}   (to store the new account)"
+  echo "After login completes, run: ${COMMAND_NAME} save ${newname}   (to store the new account)"
 }
 
 cmd_switch() {
   # Switch to a saved account by swapping only auth.json.
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 switch <account-name>
+Usage: ${COMMAND_NAME} switch NAME
 
 Backs up the current ~/.codex/auth.json first, then replaces it with
 the saved auth for <account-name>.
@@ -520,7 +521,7 @@ EOF
   fi
 
   local target="${1:-}"
-  [[ -z "$target" ]] && die "Usage: $0 switch <account-name>"
+  [[ -z "$target" ]] && die "Usage: ${COMMAND_NAME} switch NAME"
 
   ensure_dirs
   resolve_current_name_or_prompt
@@ -549,7 +550,7 @@ EOF
 cmd_refresh() {
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 refresh
+Usage: ${COMMAND_NAME} refresh
 
 Try to fetch a fresh usage snapshot for the currently active account.
 EOF
@@ -577,7 +578,7 @@ EOF
 cmd_rename() {
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 rename <old-name> <new-name>
+Usage: ${COMMAND_NAME} rename OLD_NAME NEW_NAME
 
 Rename a saved account from <old-name> to <new-name>.
 Also updates current/previous state if needed.
@@ -589,14 +590,14 @@ EOF
 
   local old_name="${1:-}"
   local new_name="${2:-}"
-  [[ -z "$old_name" || -z "$new_name" ]] && die "Usage: $0 rename <old-name> <new-name>"
+  [[ -z "$old_name" || -z "$new_name" ]] && die "Usage: ${COMMAND_NAME} rename OLD_NAME NEW_NAME"
   [[ "$old_name" == "$new_name" ]] && die "Old name and new name are the same."
 
   local old_path new_path
   old_path="$(auth_path_for "$old_name")"
   new_path="$(auth_path_for "$new_name")"
 
-  [[ -f "$old_path" ]] || die "No saved account named '${old_name}'. Use '$0 list' to see options."
+  [[ -f "$old_path" ]] || die "No saved account named '${old_name}'. Use '${COMMAND_NAME} list' to see options."
   [[ ! -f "$new_path" ]] || die "A saved account named '${new_name}' already exists."
 
   mv "$old_path" "$new_path"
@@ -616,7 +617,7 @@ EOF
 cmd_remove() {
   if is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 remove <name>
+Usage: ${COMMAND_NAME} remove NAME
 
 Remove a saved account from ${DATA_DIR}.
 The currently active account cannot be removed until you switch away from it.
@@ -628,7 +629,7 @@ EOF
   load_state
 
   local name="${1:-}"
-  [[ -z "$name" ]] && die "Usage: $0 remove <name>"
+  [[ -z "$name" ]] && die "Usage: ${COMMAND_NAME} remove NAME"
 
   local active_current
   active_current="$(resolved_current_account_name)"
@@ -638,7 +639,7 @@ EOF
 
   local target_path
   target_path="$(auth_path_for "$name")"
-  [[ -f "$target_path" ]] || die "No saved account named '${name}'. Use '$0 list' to see options."
+  [[ -f "$target_path" ]] || die "No saved account named '${name}'. Use '${COMMAND_NAME} list' to see options."
 
   rm -f "$target_path"
 
@@ -659,10 +660,10 @@ cmd_configure() {
 
   if [[ $# -eq 0 ]] || is_help_flag "${1:-}"; then
     cat <<EOF
-Usage: $0 configure
-       $0 configure reset <human|normal>
-       $0 configure show <plan|updated|next-reset|live> <on|off>
-       $0 configure preset <default|verbose>
+Usage: ${COMMAND_NAME} configure
+       ${COMMAND_NAME} configure reset <human|normal>
+       ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>
+       ${COMMAND_NAME} configure preset <default|verbose>
 
 Current config
   reset style: ${DISPLAY_RESET_STYLE}
@@ -691,7 +692,7 @@ EOF
           ok "Reset style set to '${style}'."
           ;;
         *)
-          die "Usage: $0 configure reset <human|normal>"
+          die "Usage: ${COMMAND_NAME} configure reset <human|normal>"
           ;;
       esac
       ;;
@@ -699,13 +700,13 @@ EOF
       local field="${2:-}"
       local raw_value="${3:-}"
       local value
-      value="$(normalize_toggle "$raw_value")" || die "Usage: $0 configure show <plan|updated|next-reset|live> <on|off>"
+      value="$(normalize_toggle "$raw_value")" || die "Usage: ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>"
       case "$field" in
         plan) DISPLAY_SHOW_PLAN="$value" ;;
         updated) DISPLAY_SHOW_UPDATED="$value" ;;
         next-reset) DISPLAY_SHOW_NEXT_RESET="$value" ;;
         live) DISPLAY_SHOW_LIVE="$value" ;;
-        *) die "Usage: $0 configure show <plan|updated|next-reset|live> <on|off>" ;;
+        *) die "Usage: ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>" ;;
       esac
       save_config
       ok "Set '${field}' to '${raw_value}'."
@@ -728,14 +729,14 @@ EOF
           DISPLAY_SHOW_LIVE="1"
           ;;
         *)
-          die "Usage: $0 configure preset <default|verbose>"
+          die "Usage: ${COMMAND_NAME} configure preset <default|verbose>"
           ;;
       esac
       save_config
       ok "Applied '${preset}' preset."
       ;;
     *)
-      die "Unknown configure command. See '$0 configure --help'."
+      die "Unknown configure command. See '${COMMAND_NAME} configure --help'."
       ;;
   esac
 }
@@ -746,8 +747,8 @@ Codex Account Switcher
 
 Swap between saved Codex accounts and show live usage for each one.
 
-Usage: $0 [COMMAND]
-       $0 <ACCOUNT_NAME>
+Usage: ${COMMAND_NAME} [COMMAND]
+       ${COMMAND_NAME} ACCOUNT_NAME
 
 Commands:
   list         Show saved accounts with live usage
@@ -798,7 +799,7 @@ main() {
       if saved_account_exists "$cmd"; then
         cmd_switch "$cmd" "$@"
       else
-        die "Unknown command or saved account: $cmd. See '$0 help'."
+        die "Unknown command or saved account: $cmd. See '${COMMAND_NAME} help'."
       fi
       ;;
   esac

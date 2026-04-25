@@ -1,6 +1,6 @@
 # codex-acc-sw
 
-Small hobby project for juggling multiple OpenAI Codex CLI accounts without constantly logging in and out.
+`codex-account-switch` is a small Unix-style helper for switching between multiple OpenAI Codex CLI accounts without repeatedly logging in and out.
 
 This repo lives in the same problem space as the original [codex-cli-account-switcher](https://github.com/bashar94/codex-cli-account-switcher), but it has diverged into its own script, usage flow, and account/usage handling.
 
@@ -12,18 +12,7 @@ Relevant background from the original project:
 
 This repo is a separate hobby project built from that starting point and adapted into its own local workflow.
 
-## Status
-
-This is a hobby project. It is intended to be practical, local, and lightweight rather than polished or heavily battle-tested.
-
-What I have personally tested:
-- macOS
-
-What should work, but is less verified:
-- Linux
-- WSL
-
-## What it does
+## Features
 
 - Saves one Codex login per account name
 - Switches accounts by replacing only `~/.codex/auth.json`
@@ -32,7 +21,18 @@ What should work, but is less verified:
 - Shows current and weekly usage percentages per saved account
 - Shows the next current-window reset time per saved account
 - Fetches live usage on every `list`, `current`, and account switch
-- Switches accounts with `acc-sw <name>`
+- Switches accounts with `codex-account-switch ACCOUNT_NAME`
+
+## Status
+
+This is a hobby project. It is intended to be practical, local, and lightweight rather than polished or heavily battle-tested.
+
+Tested:
+- macOS
+
+Expected to work, but less verified:
+- Linux
+- WSL
 
 ## Requirements
 
@@ -56,109 +56,144 @@ Install Codex CLI if needed:
 ```bash
 git clone https://github.com/MaximilianMauroner/codex-acc-sw.git
 cd codex-acc-sw
-chmod +x codex-accounts.sh
 ```
 
-Optional global shortcut:
+Install for the current user:
 
 ```bash
-sudo ln -sf "$(pwd)/codex-accounts.sh" /usr/local/bin/acc-sw
+make install PREFIX="$HOME/.local"
 ```
 
-If you do not want a global symlink, you can also run the script directly with:
+Install system-wide:
+
+```bash
+sudo make install PREFIX=/usr/local
+```
+
+Install the optional `acc-sw` alias:
+
+```bash
+make install PREFIX="$HOME/.local" INSTALL_ALIAS=1
+```
+
+Packaging or staged installs can use `DESTDIR`:
+
+```bash
+make install PREFIX=/usr/local DESTDIR="$PWD/stage"
+```
+
+You can also run it directly from the repository:
 
 ```bash
 ./codex-accounts.sh
 ```
 
-## Commands
+## Usage
 
 ```bash
-acc-sw list
-acc-sw current
-acc-sw configure
-acc-sw save <name>
-acc-sw add <name>
-acc-sw <name>
-acc-sw rename <old-name> <new-name>
-acc-sw remove <name>
+codex-account-switch [COMMAND]
+codex-account-switch ACCOUNT_NAME
 ```
 
-What they do:
+## Commands
 
-- `acc-sw list`
-  Lists saved accounts and fetches live current and weekly usage remaining for each one, plus the next current-window reset time.
+```text
+codex-account-switch list
+codex-account-switch current
+codex-account-switch configure
+codex-account-switch save [NAME]
+codex-account-switch add NAME
+codex-account-switch ACCOUNT_NAME
+codex-account-switch rename OLD_NAME NEW_NAME
+codex-account-switch remove NAME
+```
 
-- `acc-sw current`
-  Shows the active account, its live usage, and the next current-window reset time.
+| Command | Description |
+| --- | --- |
+| `codex-account-switch list` | List saved accounts with live usage, including the next reset when available |
+| `codex-account-switch current` | Show the active account with live usage |
+| `codex-account-switch configure` | Configure reset style and optional output fields |
+| `codex-account-switch save [NAME]` | Save the current login under `NAME`, or prompt if omitted |
+| `codex-account-switch add NAME` | Prepare for login to a new account named `NAME` |
+| `codex-account-switch ACCOUNT_NAME` | Switch to an existing saved account |
+| `codex-account-switch rename OLD_NAME NEW_NAME` | Rename a saved account |
+| `codex-account-switch remove NAME` | Remove a saved account that is not currently active |
 
-- `acc-sw configure`
-  Configures usage display options such as relative vs absolute reset time and optional fields like `plan`, `updated`, and `live`.
+## Standard install variables
 
-- `acc-sw save <name>`
-  Saves the currently logged-in account under a name.
-
-- `acc-sw add <name>`
-  Prepares for logging into a brand new account. It backs up the current account if needed, removes the active `auth.json`, and then you run `codex login`.
-
-- `acc-sw <name>`
-  Switches to a saved account by replacing `~/.codex/auth.json`.
-
-- `acc-sw rename <old-name> <new-name>`
-  Renames a saved account and updates related saved state.
-
-- `acc-sw remove <name>`
-  Removes a saved account. You must switch away first if it is currently active.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PREFIX` | `/usr/local` | Base install prefix |
+| `DESTDIR` | empty | Staging root for packaging |
+| `BINDIR` | `$(PREFIX)/bin` | Command install directory |
+| `LIBEXECDIR` | `$(PREFIX)/libexec/codex-account-switch` | Private helper/script directory |
+| `INSTALL_ALIAS` | `0` | Set to `1` to install `acc-sw` |
 
 ## Quick start
 
-Save your current Codex login:
+Save the current login:
 
 ```bash
-acc-sw save main
+codex-account-switch save main
 ```
 
 Add another account:
 
 ```bash
-acc-sw add second
+codex-account-switch add second
 codex login
-acc-sw save second
+codex-account-switch save second
 ```
 
-Switch between them:
+Switch between accounts:
 
 ```bash
-acc-sw second
-acc-sw main
+codex-account-switch second
+codex-account-switch main
 ```
 
-Check the saved accounts:
+Show all saved accounts:
 
 ```bash
-acc-sw list
+codex-account-switch list
 ```
 
-Configure display output:
+Configure output:
 
 ```bash
-acc-sw configure
-acc-sw configure reset human
-acc-sw configure show plan on
-acc-sw configure preset default
+codex-account-switch configure
+codex-account-switch configure reset human
+codex-account-switch configure show plan on
+codex-account-switch configure preset default
 ```
 
 ## How it works
 
-The script only swaps the active Codex auth file:
+`codex-account-switch` only swaps the active Codex auth file:
 
 - active account: `~/.codex/auth.json`
 - saved accounts: `~/.codex/accounts/<name>.auth.json`
 
-It does not replace your broader Codex home directory, so your config, history, sessions, and logs stay in place.
+It does not replace the rest of your Codex home directory, so config, history, sessions, and logs stay in place.
 
 For usage reporting, it calls the usage API directly whenever it shows usage data. `list` fetches each saved account live from its saved auth file, while `current` and account switching fetch live from the active `~/.codex/auth.json`.
-By default, the output is compact and shows `window`, `week`, and a human-readable `next reset` countdown. Free-tier accounts collapse to `free plan` by default. You can change the reset style and optional fields with `acc-sw configure`.
+By default, the output is compact and shows `window`, `week`, and a human-readable `next reset` countdown. Free-tier accounts collapse to `free plan` by default. You can change the reset style and optional fields with `codex-account-switch configure`.
+
+## Configuration
+
+Display settings are stored in `~/.codex/switch/config`.
+
+```bash
+codex-account-switch configure
+codex-account-switch configure reset human
+codex-account-switch configure reset normal
+codex-account-switch configure show plan on
+codex-account-switch configure show updated on
+codex-account-switch configure show next-reset off
+codex-account-switch configure show live on
+codex-account-switch configure preset default
+codex-account-switch configure preset verbose
+```
 
 ## Data stored locally
 
@@ -168,7 +203,7 @@ By default, the output is compact and shows `window`, `week`, and a human-readab
 | `~/.codex/accounts/<name>.auth.json` | Saved account credentials |
 | `~/.codex/switch/state` | Active account state used for switching |
 
-## Notes and caveats
+## Notes
 
 - Only the auth file is swapped. This is intentional.
 - `list`, `current`, and account switching do not read from a local usage cache. They fetch live usage data every time.
