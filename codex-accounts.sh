@@ -163,6 +163,10 @@ last_seen = fmt_ts(snapshot.get("last_seen_at"))
 if last_seen:
     parts.append(f"updated: {last_seen}")
 
+current_resets = fmt_ts(snapshot.get("current_resets_at"))
+if current_resets:
+    parts.append(f"next reset: {current_resets}")
+
 if status:
     parts.append(status)
 
@@ -488,6 +492,46 @@ EOF
   ok "Renamed '${old_name}' to '${new_name}'."
 }
 
+cmd_remove() {
+  if is_help_flag "${1:-}"; then
+    cat <<EOF
+Usage: $0 remove <name>
+
+Remove a saved account from ${DATA_DIR}.
+The currently active account cannot be removed until you switch away from it.
+EOF
+    return
+  fi
+
+  ensure_dirs
+  load_state
+
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: $0 remove <name>"
+
+  local active_current
+  active_current="$(resolved_current_account_name)"
+  if [[ -n "${active_current:-}" && "$name" == "$active_current" ]]; then
+    die "Cannot remove the active account '${name}'. Switch to another account first."
+  fi
+
+  local target_path
+  target_path="$(auth_path_for "$name")"
+  [[ -f "$target_path" ]] || die "No saved account named '${name}'. Use '$0 list' to see options."
+
+  rm -f "$target_path"
+
+  if [[ "${CURRENT:-}" == "$name" ]]; then
+    CURRENT=""
+  fi
+  if [[ "${PREVIOUS:-}" == "$name" ]]; then
+    PREVIOUS=""
+  fi
+  save_state "${CURRENT:-}" "${PREVIOUS:-}"
+
+  ok "Removed '${name}'."
+}
+
 cmd_help() {
   cat <<EOF
 codex-accounts.sh — manage multiple Codex CLI accounts
@@ -497,13 +541,15 @@ USAGE
       Shortcut for '$0 switch <name>' when <name> matches a saved account.
 
   $0 list
-      Show all saved accounts (from ${DATA_DIR}) with live current/weekly remaining usage.
+      Show all saved accounts (from ${DATA_DIR}) with live current/weekly remaining usage
+      and the next current-window reset time when available.
 
   $0 current
-      Show the active account with live usage.
+      Show the active account with live usage and the next current-window reset time.
 
   $0 refresh
-      Try to fetch a fresh usage snapshot for the active account.
+      Try to fetch a fresh usage snapshot for the active account and show the next
+      current-window reset time.
 
   $0 save [<name>]
       Save the current ~/.codex/auth.json into ${DATA_DIR}/<name>.auth.json.
@@ -522,11 +568,16 @@ USAGE
   $0 rename <old-name> <new-name>
       Rename a saved account and update saved state references.
 
+  $0 remove <name>
+      Remove a saved account.
+      Refuses to remove the currently active account.
+
 NOTES
   - Only auth.json is saved and restored. Your config, history, sessions, and logs stay in place.
   - Usage values are fetched live from the usage API every time they are shown.
   - list fetches live usage for each saved account using that account's saved auth file.
   - current and switch fetch live usage for the active account using ~/.codex/auth.json.
+  - When available, output includes the next current-window reset time from the API.
   - refresh uses a longer timeout for the same live API path.
   - If ~/.codex/auth.json is missing when saving/adding, you'll be prompted to login first.
   - Install Codex if needed:  brew install codex
@@ -547,6 +598,7 @@ main() {
     add)     cmd_add "$@";;
     switch)  cmd_switch "$@";;
     rename)  cmd_rename "$@";;
+    remove|rm|delete) cmd_remove "$@";;
     help|--help|-h) cmd_help;;
     *)
       if saved_account_exists "$cmd"; then

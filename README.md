@@ -2,15 +2,7 @@
 
 Small hobby project for juggling multiple OpenAI Codex CLI accounts without constantly logging in and out.
 
-This repo lives in the same problem space as the original [codex-cli-account-switcher](https://github.com/bashar94/codex-cli-account-switcher), but it has diverged into its own script, usage flow, and account/usage handling.
-
 The official [OpenAI Codex CLI](https://github.com/openai/codex) still does not support multi-account login. If you use separate personal, work, or testing accounts, switching normally means replacing `~/.codex/auth.json` by hand or re-authenticating every time.
-
-Relevant background from the original project:
-- the original author raised [openai/codex#4432](https://github.com/openai/codex/issues/4432) for native multi-account support
-- the original author also opened [openai/codex#4457](https://github.com/openai/codex/pull/4457) with an implementation attempt
-
-This repo is a separate hobby project built from that starting point and adapted into its own local workflow.
 
 ## Status
 
@@ -30,6 +22,7 @@ What should work, but is less verified:
 - Leaves the rest of `~/.codex` alone
 - Tracks the active account name
 - Shows current and weekly usage percentages per saved account
+- Shows the next current-window reset time per saved account
 - Fetches live usage on every `list`, `current`, `switch`, and `refresh`
 - Supports a shorthand switch command: `acc-sw <name>`
 
@@ -81,18 +74,19 @@ acc-sw add <name>
 acc-sw <name>
 acc-sw switch <name>
 acc-sw rename <old-name> <new-name>
+acc-sw remove <name>
 ```
 
 What they do:
 
 - `acc-sw list`
-  Lists saved accounts and fetches live current and weekly usage remaining for each one.
+  Lists saved accounts and fetches live current and weekly usage remaining for each one, plus the next current-window reset time.
 
 - `acc-sw current`
-  Shows the active account and its live usage.
+  Shows the active account, its live usage, and the next current-window reset time.
 
 - `acc-sw refresh`
-  Runs a longer manual live refresh for the active account's usage.
+  Runs a longer manual live refresh for the active account's usage and shows the next current-window reset time.
 
 - `acc-sw save <name>`
   Saves the currently logged-in account under a name.
@@ -108,6 +102,9 @@ What they do:
 
 - `acc-sw rename <old-name> <new-name>`
   Renames a saved account and updates related saved state.
+
+- `acc-sw remove <name>`
+  Removes a saved account. You must switch away first if it is currently active.
 
 ## Quick start
 
@@ -154,6 +151,7 @@ The script only swaps the active Codex auth file:
 It does not replace your broader Codex home directory, so your config, history, sessions, and logs stay in place.
 
 For usage reporting, it calls the usage API directly whenever it shows usage data. `list` fetches each saved account live from its saved auth file, while `current`, `switch`, and `refresh` fetch live from the active `~/.codex/auth.json`.
+The output also includes the next current-window reset time when the API returns it, so you can see when that account becomes usable again.
 
 ## Data stored locally
 
@@ -173,6 +171,6 @@ For usage reporting, it calls the usage API directly whenever it shows usage dat
 - If `~/.codex/auth.json` is missing when saving or adding, the script will tell you to log in first.
 - Since this is a hobby project, expect rough edges and verify behavior before relying on it in a critical workflow.
 
-## Why this exists
+## License
 
-Codex CLI multi-account support would be better as a native feature. Until then, this script is a simple local workaround that has been good enough for my own setup.
+This project is released under the MIT License. See `LICENSE`.
