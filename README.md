@@ -31,8 +31,8 @@ What should work, but is less verified:
 - Tracks the active account name
 - Shows current and weekly usage percentages per saved account
 - Shows the next current-window reset time per saved account
-- Fetches live usage on every `list`, `current`, `switch`, and `refresh`
-- Supports a shorthand switch command: `acc-sw <name>`
+- Fetches live usage on every `list`, `current`, and account switch
+- Switches accounts with `acc-sw <name>`
 
 ## Requirements
 
@@ -76,11 +76,10 @@ If you do not want a global symlink, you can also run the script directly with:
 ```bash
 acc-sw list
 acc-sw current
-acc-sw refresh
+acc-sw configure
 acc-sw save <name>
 acc-sw add <name>
 acc-sw <name>
-acc-sw switch <name>
 acc-sw rename <old-name> <new-name>
 acc-sw remove <name>
 ```
@@ -93,8 +92,8 @@ What they do:
 - `acc-sw current`
   Shows the active account, its live usage, and the next current-window reset time.
 
-- `acc-sw refresh`
-  Runs a longer manual live refresh for the active account's usage and shows the next current-window reset time.
+- `acc-sw configure`
+  Configures usage display options such as relative vs absolute reset time and optional fields like `plan`, `updated`, and `live`.
 
 - `acc-sw save <name>`
   Saves the currently logged-in account under a name.
@@ -102,11 +101,8 @@ What they do:
 - `acc-sw add <name>`
   Prepares for logging into a brand new account. It backs up the current account if needed, removes the active `auth.json`, and then you run `codex login`.
 
-- `acc-sw switch <name>`
-  Switches to a saved account by replacing `~/.codex/auth.json`.
-
 - `acc-sw <name>`
-  Shortcut for `acc-sw switch <name>`.
+  Switches to a saved account by replacing `~/.codex/auth.json`.
 
 - `acc-sw rename <old-name> <new-name>`
   Renames a saved account and updates related saved state.
@@ -143,10 +139,13 @@ Check the saved accounts:
 acc-sw list
 ```
 
-Refresh live usage for the active account:
+Configure display output:
 
 ```bash
-acc-sw refresh
+acc-sw configure
+acc-sw configure reset human
+acc-sw configure show plan on
+acc-sw configure preset default
 ```
 
 ## How it works
@@ -158,8 +157,8 @@ The script only swaps the active Codex auth file:
 
 It does not replace your broader Codex home directory, so your config, history, sessions, and logs stay in place.
 
-For usage reporting, it calls the usage API directly whenever it shows usage data. `list` fetches each saved account live from its saved auth file, while `current`, `switch`, and `refresh` fetch live from the active `~/.codex/auth.json`.
-The output also includes the next current-window reset time when the API returns it, so you can see when that account becomes usable again.
+For usage reporting, it calls the usage API directly whenever it shows usage data. `list` fetches each saved account live from its saved auth file, while `current` and account switching fetch live from the active `~/.codex/auth.json`.
+By default, the output is compact and shows `window`, `week`, and a human-readable `next reset` countdown. Free-tier accounts collapse to `free plan` by default. You can change the reset style and optional fields with `acc-sw configure`.
 
 ## Data stored locally
 
@@ -172,9 +171,8 @@ The output also includes the next current-window reset time when the API returns
 ## Notes and caveats
 
 - Only the auth file is swapped. This is intentional.
-- `list`, `current`, `switch`, and `refresh` do not read from a local usage cache. They fetch live usage data every time.
+- `list`, `current`, and account switching do not read from a local usage cache. They fetch live usage data every time.
 - `list` fetches each saved account directly from its saved auth file, so it can show up-to-date data for accounts that are not currently active.
-- `refresh` uses a longer timeout than the automatic refresh path.
 - The active `[active]` marker is derived from the live `~/.codex/auth.json` when possible, not only from the saved state file.
 - If `~/.codex/auth.json` is missing when saving or adding, the script will tell you to log in first.
 - Since this is a hobby project, expect rough edges and verify behavior before relying on it in a critical workflow.
