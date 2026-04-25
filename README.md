@@ -53,6 +53,26 @@ Install Codex CLI if needed:
 
 ## Installation
 
+One-line install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/main/install.sh | bash
+```
+
+One-line install with the short alias too:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/main/install.sh | bash -s -- --alias
+```
+
+Install a specific tagged release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/main/install.sh | bash -s -- --version v0.1.0
+```
+
+Manual install:
+
 ```bash
 git clone https://github.com/MaximilianMauroner/codex-acc-sw.git
 cd codex-acc-sw
