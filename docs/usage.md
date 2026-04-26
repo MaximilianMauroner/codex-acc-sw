@@ -3,7 +3,7 @@
 ## Commands
 
 ```text
-codex-account-switch list
+codex-account-switch status
 codex-account-switch current
 codex-account-switch configure
 codex-account-switch save [NAME]
@@ -15,9 +15,9 @@ codex-account-switch remove NAME
 
 | Command | Description |
 | --- | --- |
-| `codex-account-switch list` | List saved accounts with live usage, including the next reset when available |
+| `codex-account-switch status` | Show all accounts with live usage (`list` is a backward-compatible alias) |
 | `codex-account-switch current` | Show the active account with live usage |
-| `codex-account-switch configure` | Configure reset style and optional output fields |
+| `codex-account-switch configure` | Configure reset style and optional display fields |
 | `codex-account-switch save [NAME]` | Save the current login under `NAME`, or prompt if omitted. Refuses to overwrite a different saved account |
 | `codex-account-switch add NAME` | Prepare for login to a new account named `NAME`. Refuses existing names and saves the current login first if needed |
 | `codex-account-switch ACCOUNT_NAME` | Switch to an existing saved account |
@@ -47,11 +47,29 @@ codex-account-switch second
 codex-account-switch main
 ```
 
-Show all saved accounts:
+Check status of all accounts:
 
 ```bash
-codex-account-switch list
+acc-sw status
 ```
+
+## Status output
+
+```
+── codex ───────────────────────────────────────────────
+* main    5h: 100%  week:   0%  reset: 4h59m / 2d1h
+  second  5h:   0%  week:   1%  reset: 49m   / 2d13h
+  fourth  5h:   0%  week:  69%  reset: 3h53m / 6d16h
+── claude ──────────────────────────────────────────────
+  claude  5h:  55%  week:  70%  reset: 2h15m / 4d3h
+```
+
+- `*` marks the active account.
+- `5h:` — remaining budget in the current 5-hour window.
+- `week:` — remaining budget for the current 7-day period.
+- `reset: A / B` — time until the 5h window resets / time until the weekly reset. Minutes are hidden on the weekly value once more than a day remains.
+- Both percentages are color-coded: 🔴 red at 0 %, 🟡 yellow at 1–10 %, ⬜ default at 11–60 %, 🟢 green above 60 %.
+- The Claude section reads live data from the Anthropic API via the Claude Code keychain credentials (macOS only).
 
 ## Output configuration
 
@@ -61,7 +79,7 @@ Show current settings:
 codex-account-switch configure
 ```
 
-Use relative reset times:
+Use relative reset times (default):
 
 ```bash
 codex-account-switch configure reset human
@@ -73,27 +91,12 @@ Use absolute reset timestamps:
 codex-account-switch configure reset normal
 ```
 
-Toggle optional fields:
+Toggle the Claude section:
 
 ```bash
-codex-account-switch configure show plan on
-codex-account-switch configure show updated on
-codex-account-switch configure show next-reset off
-codex-account-switch configure show live on
+codex-account-switch configure show claude off
+codex-account-switch configure show claude on
 ```
-
-Apply presets:
-
-```bash
-codex-account-switch configure preset default
-codex-account-switch configure preset verbose
-```
-
-By default:
-
-- output is compact
-- free-tier accounts show as `free plan`
-- the next reset is shown as a relative countdown
 
 ## How it works
 
@@ -106,8 +109,9 @@ It does not replace the rest of your Codex home directory, so config, history, s
 
 For usage reporting:
 
-- `list` fetches each saved account live from its saved auth file
+- `status` fetches each saved account live from its saved auth file
 - `current` and account switching fetch live from the active `~/.codex/auth.json`
+- the Claude section is fetched from the Anthropic OAuth API using the Claude Code keychain token
 - free-tier accounts are shown as `free plan`
 
 ## Stored files
@@ -123,6 +127,6 @@ For usage reporting:
 
 - Only the auth file is swapped.
 - Usage is fetched live whenever it is shown.
-- The active `[active]` marker is derived from the live `~/.codex/auth.json` when possible.
+- The active `*` marker is derived from the live `~/.codex/auth.json` when possible.
 - If `~/.codex/auth.json` is missing when saving, the script will tell you to log in first.
 - `add NAME` reserves `NAME` for the next login and will not overwrite an existing saved account.
