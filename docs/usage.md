@@ -18,8 +18,8 @@ codex-account-switch remove NAME
 | `codex-account-switch list` | List saved accounts with live usage, including the next reset when available |
 | `codex-account-switch current` | Show the active account with live usage |
 | `codex-account-switch configure` | Configure reset style and optional output fields |
-| `codex-account-switch save [NAME]` | Save the current login under `NAME`, or prompt if omitted |
-| `codex-account-switch add NAME` | Prepare for login to a new account named `NAME` |
+| `codex-account-switch save [NAME]` | Save the current login under `NAME`, or prompt if omitted. Refuses to overwrite a different saved account |
+| `codex-account-switch add NAME` | Prepare for login to a new account named `NAME`. Refuses existing names and saves the current login first if needed |
 | `codex-account-switch ACCOUNT_NAME` | Switch to an existing saved account |
 | `codex-account-switch rename OLD_NAME NEW_NAME` | Rename a saved account |
 | `codex-account-switch remove NAME` | Remove a saved account that is not currently active |
@@ -124,4 +124,5 @@ For usage reporting:
 - Only the auth file is swapped.
 - Usage is fetched live whenever it is shown.
 - The active `[active]` marker is derived from the live `~/.codex/auth.json` when possible.
-- If `~/.codex/auth.json` is missing when saving or adding, the script will tell you to log in first.
+- If `~/.codex/auth.json` is missing when saving, the script will tell you to log in first.
+- `add NAME` reserves `NAME` for the next login and will not overwrite an existing saved account.
