@@ -550,6 +550,19 @@ cmd_list() {
 
   local line_width=$((46 + max_name_len))
 
+  # Codex section
+  if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
+    print_divider "codex" "$line_width"
+  fi
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    echo "(no accounts saved yet)"
+  else
+    for base in "${names[@]}"; do
+      display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" "$max_name_len" || true
+    done
+  fi
+
   # Claude section
   if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
     print_divider "claude" "$line_width"
@@ -560,20 +573,6 @@ cmd_list() {
       printf "  %-*s  not available\n" "$max_name_len" "claude"
     fi
   fi
-
-  # Codex section
-  if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
-    print_divider "codex" "$line_width"
-  fi
-
-  if [[ ${#names[@]} -eq 0 ]]; then
-    echo "(no accounts saved yet)"
-    return
-  fi
-
-  for base in "${names[@]}"; do
-    display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" "$max_name_len" || true
-  done
 }
 
 cmd_current() {
@@ -853,7 +852,7 @@ Usage: ${COMMAND_NAME} [COMMAND]
        ${COMMAND_NAME} ACCOUNT_NAME
 
 Commands:
-  list         Show saved accounts with live usage
+  status       Show all accounts with live usage (alias: list)
   current      Show the active account with live usage
   configure    Configure display style and optional fields
   save [NAME]  Save the current login under a name
@@ -877,7 +876,7 @@ Storage:
 
 Notes:
   Usage is fetched live whenever it is shown.
-  list reads each saved account from its saved auth file.
+  status reads each saved account from its saved auth file.
   current and account switching read the active account from ~/.codex/auth.json.
 EOF
 }
@@ -889,7 +888,7 @@ main() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    list)    cmd_list "$@";;
+    status|list) cmd_list "$@";;
     current) cmd_current "$@";;
     configure|config) cmd_configure "$@";;
     save)    cmd_save "$@";;
