@@ -20,28 +20,30 @@ curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/mai
 Save your current login, add a second account, then check status:
 
 ```bash
-codex-account-switch save main
-codex-account-switch add second   # logs out, run: codex login && acc-sw save second
+acc-sw save work
+acc-sw add personal   # prepares a fresh login slot
+codex login           # authenticate the new account
+acc-sw save personal
 acc-sw status
 ```
 
 Switch accounts instantly:
 
 ```bash
-acc-sw second
-acc-sw main
+acc-sw personal
+acc-sw work
 ```
 
 ## Output
 
 ```
 $ acc-sw status
-── codex ───────────────────────────────────────────────
-* main    5h: 100%  week:   0%  reset: 4h59m / 2d1h
-  second  5h:   0%  week:   1%  reset: 49m   / 2d13h
-  fourth  5h:   0%  week:  69%  reset: 3h53m / 6d16h
-── claude ──────────────────────────────────────────────
-  claude  5h:  55%  week:  70%  reset: 2h15m / 4d3h
+── codex ──────────────────────────────────────────────
+* work      5h:  82%  week:  54%  reset: 1h14m / 5d3h
+  personal  5h:   0%  week:  91%  reset: 1h14m / 5d3h
+  client    5h:   7%  week:  23%  reset: 1h14m / 5d3h
+── claude ─────────────────────────────────────────────
+  claude    5h:  38%  week:  67%  reset: 1h14m / 5d3h
 ```
 
 Column guide:
@@ -60,7 +62,7 @@ Color coding (applied to both `5h:` and `week:` values):
 - 🟡 **yellow** — 1 – 10 % remaining
 - 🔴 **red** — 0 % remaining (exhausted)
 
-The Claude section is fetched automatically from the Anthropic API using the Claude Code keychain credentials (macOS only). Toggle it with:
+The Claude section is fetched automatically from the Anthropic API using the Claude Code keychain credentials (macOS only). Toggle it off with:
 
 ```bash
 acc-sw configure show claude off
