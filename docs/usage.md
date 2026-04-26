@@ -26,28 +26,28 @@ codex-account-switch remove NAME
 
 ## Common workflow
 
-Save the current login:
+Save the current login under a name:
 
 ```bash
-codex-account-switch save main
+codex-account-switch save work
 ```
 
-Add another account:
+Add a second account:
 
 ```bash
-codex-account-switch add second
+codex-account-switch add personal
 codex login
-codex-account-switch save second
+codex-account-switch save personal
 ```
 
 Switch between accounts:
 
 ```bash
-codex-account-switch second
-codex-account-switch main
+codex-account-switch personal
+codex-account-switch work
 ```
 
-Check status of all accounts:
+Show status for all saved accounts:
 
 ```bash
 acc-sw status
@@ -56,12 +56,13 @@ acc-sw status
 ## Status output
 
 ```
-── codex ───────────────────────────────────────────────
-* main    5h: 100%  week:   0%  reset: 4h59m / 2d1h
-  second  5h:   0%  week:   1%  reset: 49m   / 2d13h
-  fourth  5h:   0%  week:  69%  reset: 3h53m / 6d16h
-── claude ──────────────────────────────────────────────
-  claude  5h:  55%  week:  70%  reset: 2h15m / 4d3h
+$ acc-sw status
+── codex ──────────────────────────────────────────────
+* work      5h:  82%  week:  54%  reset: 1h14m / 5d3h
+  personal  5h:   0%  week:  91%  reset: 1h14m / 5d3h
+  client    5h:   7%  week:  23%  reset: 1h14m / 5d3h
+── claude ─────────────────────────────────────────────
+  claude    5h:  38%  week:  67%  reset: 1h14m / 5d3h
 ```
 
 - `*` marks the active account.
@@ -69,7 +70,7 @@ acc-sw status
 - `week:` — remaining budget for the current 7-day period.
 - `reset: A / B` — time until the 5h window resets / time until the weekly reset. Minutes are hidden on the weekly value once more than a day remains.
 - Both percentages are color-coded: 🔴 red at 0 %, 🟡 yellow at 1–10 %, ⬜ default at 11–60 %, 🟢 green above 60 %.
-- The Claude section reads live data from the Anthropic API via the Claude Code keychain credentials (macOS only).
+- The Claude row is fetched from the Anthropic API via the Claude Code keychain credentials (macOS only). It appears only when Claude Code is installed and signed in.
 
 ## Output configuration
 
@@ -111,7 +112,7 @@ For usage reporting:
 
 - `status` fetches each saved account live from its saved auth file
 - `current` and account switching fetch live from the active `~/.codex/auth.json`
-- the Claude section is fetched from the Anthropic OAuth API using the Claude Code keychain token
+- the Claude row is fetched from the Anthropic OAuth API using the Claude Code keychain token
 - free-tier accounts are shown as `free plan`
 
 ## Stored files

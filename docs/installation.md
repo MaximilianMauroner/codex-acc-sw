@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/mai
 Install a specific tagged release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/main/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/MaximilianMauroner/codex-acc-sw/main/install.sh | bash -s -- --version v0.2.1
 ```
 
 ## Manual install
