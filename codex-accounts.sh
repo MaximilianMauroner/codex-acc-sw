@@ -55,6 +55,7 @@ save_state() {
 
 load_config() {
   DISPLAY_RESET_STYLE="human"
+  DISPLAY_SHOW_CLAUDE="1"
 
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -65,10 +66,16 @@ load_config() {
     human|normal) ;;
     *) DISPLAY_RESET_STYLE="human" ;;
   esac
+
+  case "${DISPLAY_SHOW_CLAUDE:-}" in
+    0|1) ;;
+    *) DISPLAY_SHOW_CLAUDE="1" ;;
+  esac
 }
 
 save_config() {
-  printf "DISPLAY_RESET_STYLE=%q\n" "$DISPLAY_RESET_STYLE" > "$CONFIG_FILE"
+  printf "DISPLAY_RESET_STYLE=%q\nDISPLAY_SHOW_CLAUDE=%q\n" \
+    "$DISPLAY_RESET_STYLE" "$DISPLAY_SHOW_CLAUDE" > "$CONFIG_FILE"
 }
 
 normalize_toggle() {
@@ -140,6 +147,67 @@ fetch_live_usage_snapshot() {
     "$SCRIPT_DIR/scripts/fetch_codex_rate_limits.py" \
     "$auth_path" \
     "$timeout_seconds"
+}
+
+fetch_claude_snapshot() {
+  local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
+
+  command -v security &>/dev/null || return 1
+
+  local creds_json
+  creds_json="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)" || return 1
+  [[ -n "${creds_json:-}" ]] || return 1
+
+  local access_token
+  access_token="$(printf '%s' "$creds_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('claudeAiOauth', {}).get('accessToken', ''))
+except Exception:
+    pass
+" 2>/dev/null)"
+  [[ -n "${access_token:-}" ]] || return 1
+
+  local response
+  response="$(curl -sf --max-time "$timeout_seconds" \
+    -H "Authorization: Bearer $access_token" \
+    -H "anthropic-beta: oauth-2025-04-20" \
+    "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)" || return 1
+
+  printf '%s' "$response" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+if 'error' in data:
+    sys.exit(1)
+fh = data.get('five_hour') or {}
+sd = data.get('seven_day') or {}
+fh_util = fh.get('utilization')
+sd_util = sd.get('utilization')
+if fh_util is None and sd_util is None:
+    sys.exit(1)
+print(json.dumps({
+    'plan_type': None,
+    'current_remaining_percent': round(max(0.0, 100.0 - float(fh_util or 0)), 1),
+    'weekly_remaining_percent':  round(max(0.0, 100.0 - float(sd_util or 0)), 1),
+    'current_resets_at': fh.get('resets_at'),
+    'weekly_resets_at':  sd.get('resets_at'),
+}))
+" 2>/dev/null
+}
+
+print_divider() {
+  local label="${1:-}"
+  local width="${2:-52}"
+  python3 -c "
+label = '$label'
+width = $width
+if label:
+    prefix = '── ' + label + ' '
+    print(prefix + '─' * max(0, width - len(prefix)))
+else:
+    print('─' * width)
+"
 }
 
 sync_active_auth_to_saved_account() {
@@ -459,6 +527,7 @@ ensure_active_auth_saved_or_prompt() {
 cmd_list() {
   ensure_dirs
   load_state
+  load_config
   local active_current
   active_current="$(resolved_current_account_name)"
 
@@ -470,15 +539,37 @@ cmd_list() {
     names+=("${base%.auth.json}")
   done
 
-  if [[ ${#names[@]} -eq 0 ]]; then
-    echo "(no accounts saved yet)"
-    return
-  fi
-
+  # Compute max name length across all rows (including "claude" if shown)
   local max_name_len=0
   for base in "${names[@]}"; do
     [[ ${#base} -gt $max_name_len ]] && max_name_len=${#base}
   done
+  if [[ "$DISPLAY_SHOW_CLAUDE" == "1" && 6 -gt $max_name_len ]]; then
+    max_name_len=6
+  fi
+
+  local line_width=$((46 + max_name_len))
+
+  # Claude section
+  if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
+    print_divider "claude" "$line_width"
+    local claude_snapshot
+    if claude_snapshot="$(fetch_claude_snapshot "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS")"; then
+      format_usage_snapshot_json "$claude_snapshot" "0" "claude" "$max_name_len"
+    else
+      printf "  %-*s  not available\n" "$max_name_len" "claude"
+    fi
+  fi
+
+  # Codex section
+  if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
+    print_divider "codex" "$line_width"
+  fi
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    echo "(no accounts saved yet)"
+    return
+  fi
 
   for base in "${names[@]}"; do
     display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" "$max_name_len" || true
@@ -705,13 +796,16 @@ cmd_configure() {
     cat <<EOF
 Usage: ${COMMAND_NAME} configure
        ${COMMAND_NAME} configure reset <human|normal>
+       ${COMMAND_NAME} configure show <claude> <on|off>
 
 Current config
-  reset style: ${DISPLAY_RESET_STYLE}
+  reset style:  ${DISPLAY_RESET_STYLE}
+  show claude:  ${DISPLAY_SHOW_CLAUDE}
 
 Notes
   - reset 'human' shows relative values like 4h59m / 2d1h.
   - reset 'normal' shows absolute timestamps like Apr 25, 2026 20:27.
+  - show claude: displays Claude Code usage above the codex accounts (macOS only).
 EOF
     return
   fi
@@ -730,6 +824,18 @@ EOF
           die "Usage: ${COMMAND_NAME} configure reset <human|normal>"
           ;;
       esac
+      ;;
+    show)
+      local field="${2:-}"
+      local raw_value="${3:-}"
+      local value
+      value="$(normalize_toggle "$raw_value")" || die "Usage: ${COMMAND_NAME} configure show <claude> <on|off>"
+      case "$field" in
+        claude) DISPLAY_SHOW_CLAUDE="$value" ;;
+        *) die "Usage: ${COMMAND_NAME} configure show <claude> <on|off>" ;;
+      esac
+      save_config
+      ok "Set '${field}' to '${raw_value}'."
       ;;
     *)
       die "Unknown configure command. See '${COMMAND_NAME} configure --help'."
