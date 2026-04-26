@@ -55,10 +55,6 @@ save_state() {
 
 load_config() {
   DISPLAY_RESET_STYLE="human"
-  DISPLAY_SHOW_PLAN="0"
-  DISPLAY_SHOW_UPDATED="0"
-  DISPLAY_SHOW_NEXT_RESET="1"
-  DISPLAY_SHOW_LIVE="0"
 
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -69,25 +65,10 @@ load_config() {
     human|normal) ;;
     *) DISPLAY_RESET_STYLE="human" ;;
   esac
-
-  local key
-  for key in DISPLAY_SHOW_PLAN DISPLAY_SHOW_UPDATED DISPLAY_SHOW_NEXT_RESET DISPLAY_SHOW_LIVE; do
-    case "${!key:-}" in
-      0|1) ;;
-      *) printf -v "$key" "0" ;;
-    esac
-  done
 }
 
 save_config() {
-  printf \
-    "DISPLAY_RESET_STYLE=%q\nDISPLAY_SHOW_PLAN=%q\nDISPLAY_SHOW_UPDATED=%q\nDISPLAY_SHOW_NEXT_RESET=%q\nDISPLAY_SHOW_LIVE=%q\n" \
-    "$DISPLAY_RESET_STYLE" \
-    "$DISPLAY_SHOW_PLAN" \
-    "$DISPLAY_SHOW_UPDATED" \
-    "$DISPLAY_SHOW_NEXT_RESET" \
-    "$DISPLAY_SHOW_LIVE" \
-    > "$CONFIG_FILE"
+  printf "DISPLAY_RESET_STYLE=%q\n" "$DISPLAY_RESET_STYLE" > "$CONFIG_FILE"
 }
 
 normalize_toggle() {
@@ -174,36 +155,53 @@ sync_active_auth_to_saved_account() {
 
 format_usage_snapshot_json() {
   local snapshot_json="$1"
-  local status="${2:-live}"
+  local is_active="${2:-0}"
+  local account_name="${3:-}"
+  local max_name_len="${4:-0}"
   load_config
 
   python3 - \
     "$snapshot_json" \
-    "$status" \
-    "$DISPLAY_RESET_STYLE" \
-    "$DISPLAY_SHOW_PLAN" \
-    "$DISPLAY_SHOW_UPDATED" \
-    "$DISPLAY_SHOW_NEXT_RESET" \
-    "$DISPLAY_SHOW_LIVE" <<'PY'
+    "$is_active" \
+    "$account_name" \
+    "$max_name_len" \
+    "$DISPLAY_RESET_STYLE" <<'PY'
 import datetime as dt
 import json
 import sys
 
 snapshot = json.loads(sys.argv[1])
-status = sys.argv[2]
-reset_style = sys.argv[3]
-show_plan = sys.argv[4] == "1"
-show_updated = sys.argv[5] == "1"
-show_next_reset = sys.argv[6] == "1"
-show_live = sys.argv[7] == "1"
+is_active = sys.argv[2] == "1"
+account_name = sys.argv[3]
+max_name_len = int(sys.argv[4])
+reset_style = sys.argv[5]
 
-def fmt(value):
+
+RESET  = "\033[0m"
+RED    = "\033[31m"
+YELLOW = "\033[33m"
+GREEN  = "\033[32m"
+
+
+def fmt_pct(value):
+    """Always returns 4 visible chars: number right-padded to 3 + '%'."""
     if value is None:
-        return "n/a"
-    value = float(value)
-    if value.is_integer():
-        return f"{int(value)}%"
-    return f"{value:.1f}%"
+        return " n/a"
+    return str(round(float(value))).rjust(3) + "%"
+
+
+def week_color(weekly_remaining):
+    if weekly_remaining is None:
+        return ""
+    pct = float(weekly_remaining)
+    if pct == 0:
+        return RED
+    if pct <= 10:
+        return YELLOW
+    if pct > 60:
+        return GREEN
+    return ""
+
 
 def fmt_ts(value):
     if not value:
@@ -221,11 +219,10 @@ def fmt_ts(value):
                 return value
     if parsed is None:
         return None
-    local_value = parsed.astimezone()
-    return local_value.strftime("%b %d, %Y %H:%M")
+    return parsed.astimezone().strftime("%b %d, %Y %H:%M")
 
 
-def fmt_relative_reset(value):
+def fmt_relative_reset(value, hide_minutes_if_days=False):
     if not value:
         return None
     parsed = None
@@ -241,58 +238,55 @@ def fmt_relative_reset(value):
                 return None
     if parsed is None:
         return None
-
     now = dt.datetime.now(dt.timezone.utc)
     remaining_seconds = max(0, int((parsed - now).total_seconds()))
     if remaining_seconds < 60:
         return "<1m"
-
     days, remainder = divmod(remaining_seconds, 86400)
     hours, remainder = divmod(remainder, 3600)
     minutes, _ = divmod(remainder, 60)
-
     parts = []
     if days:
         parts.append(f"{days}d")
     if hours or days:
         parts.append(f"{hours}h")
-    parts.append(f"{minutes}m")
+    if not (hide_minutes_if_days and days):
+        parts.append(f"{minutes}m")
     return "".join(parts)
+
 
 plan_type = snapshot.get("plan_type")
 is_free_plan = plan_type == "free"
-parts = []
+
+marker = "* " if is_active else "  "
+name = account_name.ljust(max_name_len)
 
 if is_free_plan:
-    parts.append("free plan")
-else:
-    parts.extend(
-        [
-            f"window: {fmt(snapshot.get('current_remaining_percent'))}",
-            f"week: {fmt(snapshot.get('weekly_remaining_percent'))}",
-        ]
-    )
+    print(f"{marker}{name}  free plan")
+    sys.exit(0)
 
-if show_plan and plan_type and not is_free_plan:
-    parts.append(f"plan: {plan_type}")
+weekly_remaining = snapshot.get("weekly_remaining_percent")
+window_remaining = snapshot.get("current_remaining_percent")
 
-last_seen = fmt_ts(snapshot.get("last_seen_at"))
-if show_updated and last_seen:
-    parts.append(f"updated: {last_seen}")
+def colored_pct(value):
+    raw = fmt_pct(value)
+    c = week_color(value)
+    return f"{c}{raw}{RESET}" if c else raw
+
+window_pct = colored_pct(window_remaining)
+week_pct   = colored_pct(weekly_remaining)
 
 current_reset_value = snapshot.get("current_resets_at")
-current_resets = (
-    fmt_relative_reset(current_reset_value)
-    if reset_style == "human"
-    else fmt_ts(current_reset_value)
-)
-if show_next_reset and current_resets and not is_free_plan:
-    parts.append(f"next reset: {current_resets}")
+weekly_reset_value = snapshot.get("weekly_resets_at")
 
-if show_live and status:
-    parts.append(status)
+if reset_style == "human":
+    current_reset = fmt_relative_reset(current_reset_value) or "n/a"
+    weekly_reset = fmt_relative_reset(weekly_reset_value, hide_minutes_if_days=True) or "n/a"
+else:
+    current_reset = fmt_ts(current_reset_value) or "n/a"
+    weekly_reset = fmt_ts(weekly_reset_value) or "n/a"
 
-print(" | ".join(parts))
+print(f"{marker}{name}  5h: {window_pct}  week: {week_pct}  reset: {current_reset.ljust(5)} / {weekly_reset.ljust(5)}")
 PY
 }
 
@@ -300,10 +294,14 @@ fetch_and_format_usage_for_auth_path() {
   local name="$1"
   local auth_path="$2"
   local timeout_seconds="${3:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
+  local is_active="${4:-0}"
+  local max_name_len="${5:-${#name}}"
 
   local snapshot_json
   if ! snapshot_json="$(fetch_live_usage_snapshot "$auth_path" "$timeout_seconds" 2>/dev/null)"; then
-    echo "window: n/a | week: n/a | live fetch failed"
+    local marker="  "
+    [[ "$is_active" == "1" ]] && marker="* "
+    printf "%s%-*s  fetch failed\n" "$marker" "$max_name_len" "$name"
     return 1
   fi
 
@@ -311,22 +309,24 @@ fetch_and_format_usage_for_auth_path() {
     sync_active_auth_to_saved_account "$name" >/dev/null 2>&1 || true
   fi
 
-  format_usage_snapshot_json "$snapshot_json" "live"
+  format_usage_snapshot_json "$snapshot_json" "$is_active" "$name" "$max_name_len"
 }
 
 display_usage_for_saved_account() {
   local name="$1"
   local timeout_seconds="${2:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
   local active_current="${3:-}"
+  local max_name_len="${4:-${#name}}"
 
-  local auth_path
+  local auth_path is_active=0
   if [[ -n "${active_current:-}" && "$name" == "$active_current" ]]; then
     auth_path="$AUTH_FILE"
+    is_active=1
   else
     auth_path="$(auth_path_for "$name")"
   fi
 
-  fetch_and_format_usage_for_auth_path "$name" "$auth_path" "$timeout_seconds"
+  fetch_and_format_usage_for_auth_path "$name" "$auth_path" "$timeout_seconds" "$is_active" "$max_name_len"
 }
 
 auth_path_for() {
@@ -337,6 +337,22 @@ auth_path_for() {
 saved_account_exists() {
   local name="$1"
   [[ -f "$(auth_path_for "$name")" ]]
+}
+
+auth_files_match() {
+  local left="$1"
+  local right="$2"
+  [[ -f "$left" && -f "$right" ]] || return 1
+
+  local left_account_id right_account_id
+  left_account_id="$(account_id_for_auth_path "$left")"
+  right_account_id="$(account_id_for_auth_path "$right")"
+  if [[ -n "${left_account_id:-}" && -n "${right_account_id:-}" ]]; then
+    [[ "$left_account_id" == "$right_account_id" ]]
+    return
+  fi
+
+  cmp -s "$left" "$right"
 }
 
 assert_auth_present_or_hint() {
@@ -360,6 +376,10 @@ backup_current_to() {
   assert_auth_present_or_hint
 
   local dest; dest="$(auth_path_for "$name")"
+  if [[ -f "$dest" ]] && ! auth_files_match "$AUTH_FILE" "$dest"; then
+    die "A different saved account named '${name}' already exists. Choose a new name or rename/remove the existing account first."
+  fi
+
   if [[ "$quiet" != "1" ]]; then
     note "Saving current auth.json to ${dest}..."
   fi
@@ -411,6 +431,30 @@ resolve_current_name_or_prompt() {
   fi
 }
 
+ensure_active_auth_saved_or_prompt() {
+  local reserved_name="${1:-}"
+  [[ -f "$AUTH_FILE" ]] || return 0
+
+  load_state
+  local detected
+  detected="$(current_account_name_from_auth)"
+  if [[ -n "${detected:-}" ]]; then
+    CURRENT="$detected"
+    save_state "$CURRENT" "${PREVIOUS:-}"
+    return 0
+  fi
+
+  local named
+  named="$(prompt_account_name)"
+  if [[ -n "${reserved_name:-}" && "$named" == "$reserved_name" ]]; then
+    die "'${reserved_name}' is reserved for the new login. Save the current account under a different name first."
+  fi
+  backup_current_to "$named"
+  PREVIOUS=""
+  CURRENT="$named"
+  save_state "$CURRENT" "$PREVIOUS"
+}
+
 # ------------- commands -------------
 cmd_list() {
   ensure_dirs
@@ -419,22 +463,26 @@ cmd_list() {
   active_current="$(resolved_current_account_name)"
 
   shopt -s nullglob
-  local any=0
-  local f base label usage
+  local names=()
+  local f base
   for f in "$DATA_DIR"/*.auth.json; do
-    any=1
     base="$(basename "$f")"
-    base="${base%.auth.json}"
-    label=" - ${base}"
-    if [[ "${active_current:-}" == "$base" ]]; then
-      label="${label} [active]"
-    fi
-    usage="$(display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" || true)"
-    echo "${label} | ${usage}"
+    names+=("${base%.auth.json}")
   done
-  if [[ $any -eq 0 ]]; then
+
+  if [[ ${#names[@]} -eq 0 ]]; then
     echo "(no accounts saved yet)"
+    return
   fi
+
+  local max_name_len=0
+  for base in "${names[@]}"; do
+    [[ ${#base} -gt $max_name_len ]] && max_name_len=${#base}
+  done
+
+  for base in "${names[@]}"; do
+    display_usage_for_saved_account "$base" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" "$max_name_len" || true
+  done
 }
 
 cmd_current() {
@@ -442,11 +490,9 @@ cmd_current() {
   local active_current
   active_current="$(resolved_current_account_name)"
   if [[ -n "${active_current:-}" ]]; then
-    local usage
-    usage="$(display_usage_for_saved_account "$active_current" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" || true)"
-    echo "Active:   $active_current | ${usage}"
+    display_usage_for_saved_account "$active_current" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$active_current" "${#active_current}" || true
   else
-    echo "Active:   (unknown — no state recorded yet)"
+    echo "  (unknown — no state recorded yet)"
   fi
 }
 
@@ -494,10 +540,12 @@ EOF
   fi
 
   ensure_dirs
-  resolve_current_name_or_prompt
 
   local newname="${1:-}"
   [[ -z "$newname" ]] && die "Usage: ${COMMAND_NAME} add NAME"
+  [[ ! -f "$(auth_path_for "$newname")" ]] || die "A saved account named '${newname}' already exists. Use a different name or rename/remove the existing account first."
+
+  ensure_active_auth_saved_or_prompt "$newname"
 
   if [[ -f "$AUTH_FILE" ]]; then
     note "Removing current auth.json to prepare login for '${newname}'..."
@@ -542,9 +590,7 @@ EOF
   PREVIOUS="${active_current:-${CURRENT:-}}"
   CURRENT="$target"
   save_state "$CURRENT" "$PREVIOUS"
-  local usage
-  usage="$(display_usage_for_saved_account "$CURRENT" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$CURRENT" || true)"
-  echo "Switched to ${CURRENT} | ${usage}"
+  display_usage_for_saved_account "$CURRENT" "$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS" "$CURRENT" "${#CURRENT}" || true
 }
 
 cmd_refresh() {
@@ -565,13 +611,10 @@ EOF
   [[ -n "${active_current:-}" ]] || die "No active account found."
   assert_auth_present_or_hint
 
-  local usage
-  if usage="$(display_usage_for_saved_account "$active_current" "$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS" "$active_current")"; then
-    echo "Refreshed ${active_current} | ${usage}"
+  if display_usage_for_saved_account "$active_current" "$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS" "$active_current" "${#active_current}"; then
     return
   fi
 
-  echo "Refresh failed for ${active_current} | ${usage}"
   return 1
 }
 
@@ -662,20 +705,12 @@ cmd_configure() {
     cat <<EOF
 Usage: ${COMMAND_NAME} configure
        ${COMMAND_NAME} configure reset <human|normal>
-       ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>
-       ${COMMAND_NAME} configure preset <default|verbose>
 
 Current config
   reset style: ${DISPLAY_RESET_STYLE}
-  show plan: ${DISPLAY_SHOW_PLAN}
-  show updated: ${DISPLAY_SHOW_UPDATED}
-  show next reset: ${DISPLAY_SHOW_NEXT_RESET}
-  show live: ${DISPLAY_SHOW_LIVE}
 
 Notes
-  - default output is compact: window, week, and next reset only.
-  - free accounts collapse to 'free plan' by default.
-  - reset 'human' shows relative values like 4h45m.
+  - reset 'human' shows relative values like 4h59m / 2d1h.
   - reset 'normal' shows absolute timestamps like Apr 25, 2026 20:27.
 EOF
     return
@@ -695,45 +730,6 @@ EOF
           die "Usage: ${COMMAND_NAME} configure reset <human|normal>"
           ;;
       esac
-      ;;
-    show)
-      local field="${2:-}"
-      local raw_value="${3:-}"
-      local value
-      value="$(normalize_toggle "$raw_value")" || die "Usage: ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>"
-      case "$field" in
-        plan) DISPLAY_SHOW_PLAN="$value" ;;
-        updated) DISPLAY_SHOW_UPDATED="$value" ;;
-        next-reset) DISPLAY_SHOW_NEXT_RESET="$value" ;;
-        live) DISPLAY_SHOW_LIVE="$value" ;;
-        *) die "Usage: ${COMMAND_NAME} configure show <plan|updated|next-reset|live> <on|off>" ;;
-      esac
-      save_config
-      ok "Set '${field}' to '${raw_value}'."
-      ;;
-    preset)
-      local preset="${2:-}"
-      case "$preset" in
-        default)
-          DISPLAY_RESET_STYLE="human"
-          DISPLAY_SHOW_PLAN="0"
-          DISPLAY_SHOW_UPDATED="0"
-          DISPLAY_SHOW_NEXT_RESET="1"
-          DISPLAY_SHOW_LIVE="0"
-          ;;
-        verbose)
-          DISPLAY_RESET_STYLE="human"
-          DISPLAY_SHOW_PLAN="1"
-          DISPLAY_SHOW_UPDATED="1"
-          DISPLAY_SHOW_NEXT_RESET="1"
-          DISPLAY_SHOW_LIVE="1"
-          ;;
-        *)
-          die "Usage: ${COMMAND_NAME} configure preset <default|verbose>"
-          ;;
-      esac
-      save_config
-      ok "Applied '${preset}' preset."
       ;;
     *)
       die "Unknown configure command. See '${COMMAND_NAME} configure --help'."
