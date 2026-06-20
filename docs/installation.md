@@ -7,6 +7,9 @@
 - `python3`
 - OpenAI Codex CLI installed and working
 - At least one successful `codex login`
+- Optional for the native menu-bar app: Swift toolchain / Xcode command line tools
+- Optional for native app cost history: `context-bar` or `npx`
+- Optional for the script-only menu-bar widget: [SwiftBar](https://github.com/swiftbar/SwiftBar)
 
 Install Codex CLI if needed:
 
@@ -60,6 +63,85 @@ Install the optional `acc-sw` alias:
 make install PREFIX="$HOME/.local" INSTALL_ALIAS=1
 ```
 
+## Optional native menu-bar app
+
+The native app is a small SwiftUI menu-bar app that uses the installed `codex-account-switch` command as its usage data source.
+
+Build, install, and open it:
+
+```bash
+make install PREFIX="$HOME/.local"
+make install-macos-menu-app PREFIX="$HOME/.local"
+make open-macos-menu-app
+```
+
+By default, the app is installed to:
+
+```text
+~/Applications/AI Usage Bar.app
+```
+
+Use a different install location:
+
+```bash
+make install-macos-menu-app PREFIX="$HOME/.local" MACOS_APP_INSTALL_DIR="/Applications"
+```
+
+Uninstall the app:
+
+```bash
+make uninstall-macos-menu-app
+```
+
+The app runs without a Dock icon and stores its local sparkline history at:
+
+```text
+~/Library/Application Support/AIUsageBar/history.json
+```
+
+Its 30-day cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). Install it globally for faster refreshes:
+
+```bash
+npm install -g context-bar
+```
+
+If no `context-bar` executable is found, the app falls back to `npx context-bar@latest daily --json --instances` when `npx` is available. Set `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app to force a specific binary.
+
+## Optional SwiftBar widget
+
+Install SwiftBar:
+
+```bash
+brew install swiftbar
+```
+
+Install `codex-account-switch`, then install the widget plugin:
+
+```bash
+make install PREFIX="$HOME/.local"
+make install-swiftbar-widget
+```
+
+By default, the plugin is installed to:
+
+```text
+<SwiftBar PluginDirectory>/ai-usage.1m.sh
+```
+
+If SwiftBar already has a configured plugin folder, `make install-swiftbar-widget` detects it automatically. Otherwise it installs to `~/SwiftBarPlugins`; when SwiftBar asks for its plugin folder, choose that folder.
+
+If your SwiftBar plugin folder is elsewhere:
+
+```bash
+make install-swiftbar-widget SWIFTBAR_PLUGIN_DIR="$HOME/path/to/SwiftBar Plugins"
+```
+
+Uninstall the widget plugin:
+
+```bash
+make uninstall-swiftbar-widget
+```
+
 Package or stage files with `DESTDIR`:
 
 ```bash
@@ -81,3 +163,5 @@ Run directly from the repository without installing:
 | `BINDIR` | `$(PREFIX)/bin` | Command install directory |
 | `LIBEXECDIR` | `$(PREFIX)/libexec/codex-account-switch` | Private helper/script directory |
 | `INSTALL_ALIAS` | `0` | Set to `1` to install `acc-sw` |
+| `SWIFTBAR_PLUGIN_DIR` | SwiftBar `PluginDirectory`, otherwise `~/SwiftBarPlugins` | SwiftBar plugin install directory |
+| `MACOS_APP_INSTALL_DIR` | `~/Applications` | Native menu-bar app install directory |

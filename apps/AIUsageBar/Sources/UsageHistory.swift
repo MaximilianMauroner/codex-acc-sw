@@ -1,0 +1,81 @@
+import Foundation
+
+struct HistorySample: Codable, Identifiable {
+    let id: UUID
+    let timestamp: Date
+    let currentRemaining: Double?
+    let weeklyRemaining: Double?
+
+    init(timestamp: Date, currentRemaining: Double?, weeklyRemaining: Double?) {
+        self.id = UUID()
+        self.timestamp = timestamp
+        self.currentRemaining = currentRemaining
+        self.weeklyRemaining = weeklyRemaining
+    }
+}
+
+struct UsageHistory: Codable {
+    private(set) var samplesByAccount: [String: [HistorySample]] = [:]
+
+    static func load() -> UsageHistory {
+        let url = historyURL()
+        guard let data = try? Data(contentsOf: url) else {
+            return UsageHistory()
+        }
+        return (try? JSONDecoder().decode(UsageHistory.self, from: data)) ?? UsageHistory()
+    }
+
+    mutating func record(accounts: [UsageAccount]) {
+        for account in accounts {
+            guard account.status == "ok", !account.stale, let snapshot = account.snapshot else {
+                continue
+            }
+            let timestamp = snapshot.lastSeenDate ?? Date()
+            let sample = HistorySample(
+                timestamp: timestamp,
+                currentRemaining: snapshot.currentRemainingPercent,
+                weeklyRemaining: snapshot.weeklyRemainingPercent
+            )
+            var samples = samplesByAccount[account.id] ?? []
+            if let last = samples.last, abs(last.timestamp.timeIntervalSince(timestamp)) < 30 {
+                samples[samples.count - 1] = sample
+            } else {
+                samples.append(sample)
+            }
+            samples = Array(samples.suffix(240))
+            samplesByAccount[account.id] = samples
+        }
+    }
+
+    func samples(for account: UsageAccount) -> [HistorySample] {
+        samplesByAccount[account.id] ?? []
+    }
+
+    func values(for account: UsageAccount, period: BudgetPeriod) -> [Double] {
+        samples(for: account).compactMap { sample in
+            switch period {
+            case .current: return sample.currentRemaining
+            case .weekly: return sample.weeklyRemaining
+            }
+        }
+    }
+
+    func save() {
+        let url = Self.historyURL()
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if let data = try? JSONEncoder().encode(self) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private static func historyURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return base
+            .appendingPathComponent("AIUsageBar", isDirectory: true)
+            .appendingPathComponent("history.json")
+    }
+}
