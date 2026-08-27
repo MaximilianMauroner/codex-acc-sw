@@ -69,13 +69,19 @@ EOF
 cat >"$TEST_HOME/.codex/accounts/legacy.auth.json" <<EOF
 {"tokens":{"id_token":"$subject_only_token","access_token":"$explicit_account_token"}}
 EOF
-explicit_claim_identity="$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
+read -r upgraded_identity upgraded_alias <<EOF
+$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
 import json, sys
 items = json.load(sys.stdin)["accounts"]
-print(next(item["account_identity"] for item in items if item["name"] == "legacy"))
-')"
-[[ "$explicit_claim_identity" == "$legacy_identity" ]] || \
-  fail "a stronger account claim changed an existing subject-derived identity"
+item = next(item for item in items if item["name"] == "legacy")
+print(item["account_identity"], item["account_identity_aliases"][0])
+')
+EOF
+expected_explicit_identity="$(printf explicit-owner-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[[ "$upgraded_identity" == "$expected_explicit_identity" ]] || \
+  fail "a stronger legacy account claim did not become the canonical identity"
+[[ "$upgraded_alias" == "$legacy_identity" ]] || \
+  fail "a stronger legacy account claim omitted its subject migration alias"
 
 read -r account_alias_token url_alias_token <<EOF
 $(python3 - <<'PY'
@@ -101,9 +107,57 @@ import json, sys
 items = json.load(sys.stdin)["accounts"]
 print(next(item["account_identity"] for item in items if item["name"] == "explicit"))
 ')"
-expected_explicit_identity="$(printf explicit-owner-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 [[ "$normalized_alias_identity" == "$expected_explicit_identity" ]] || \
   fail "equivalent explicit account claim aliases produced different ownership evidence"
+
+cat >"$TEST_HOME/.codex/accounts/established.auth.json" <<EOF
+{"tokens":{"account_id":"established-owner-1","id_token":"$subject_only_token"}}
+EOF
+read -r established_identity established_alias_count <<EOF
+$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["accounts"]
+item = next(item for item in items if item["name"] == "established")
+print(item["account_identity"], len(item["account_identity_aliases"]))
+')
+EOF
+expected_established_identity="$(printf established-owner-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[[ "$established_identity" == "$expected_established_identity" ]] || \
+  fail "JWT subject replaced an established top-level account identity"
+[[ "$established_alias_count" == "0" ]] || fail "established account exposed an unsafe subject migration alias"
+
+read -r shared_subject_account_a shared_subject_account_b <<EOF
+$(python3 - <<'PY'
+import base64
+import json
+
+def part(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+header = part({"alg": "none"})
+print(
+    f"{header}.{part({'sub': 'shared-subject', 'account_id': 'shared-account-a'})}.x "
+    f"{header}.{part({'sub': 'shared-subject', 'account_id': 'shared-account-b'})}.x"
+)
+PY
+)
+EOF
+cat >"$TEST_HOME/.codex/accounts/shared-a.auth.json" <<EOF
+{"tokens":{"id_token":"$shared_subject_account_a"}}
+EOF
+cat >"$TEST_HOME/.codex/accounts/shared-b.auth.json" <<EOF
+{"tokens":{"id_token":"$shared_subject_account_b"}}
+EOF
+read -r shared_identity_a shared_identity_b shared_aliases_equal <<EOF
+$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
+import json, sys
+items = {item["name"]: item for item in json.load(sys.stdin)["accounts"]}
+a, b = items["shared-a"], items["shared-b"]
+print(a["account_identity"], b["account_identity"], a["account_identity_aliases"] == b["account_identity_aliases"])
+')
+EOF
+[[ "$shared_identity_a" != "$shared_identity_b" ]] || fail "different accounts sharing a subject reused one canonical identity"
+[[ "$shared_aliases_equal" == "True" ]] || fail "shared-subject fixture did not exercise ambiguous migration aliases"
 
 assert_malformed_auth_is_identityless() {
   local auth_json="$1"
@@ -194,6 +248,38 @@ assert claude["snapshot"]["current_remaining_percent"] == 50
 PY
 [[ -f "$claude_cache" ]] || fail "Claude credential failure deleted a valid owner-bound cache"
 
+conflicting_claude_token="$(python3 - <<'PY'
+import base64
+import json
+
+def part(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+print(f"{part({'alg': 'none'})}.{part({'sub': 'conflicting-token-owner'})}.x")
+PY
+)"
+cat >"$FAKE_BIN/security" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '{"accountUuid":"conflicting-credential-owner","claudeAiOauth":{"accessToken":"$conflicting_claude_token"}}'
+EOF
+chmod 755 "$FAKE_BIN/security"
+HOME="$TEST_HOME" \
+  PATH="$FAKE_BIN:$PATH" \
+  CODEX_ACCOUNT_SWITCH_CLAUDE_USAGE_URL="http://127.0.0.1:1/usage" \
+  bash "$COMMAND" widget --format json >"$TEST_HOME/claude-conflict.json"
+python3 - "$TEST_HOME/claude-conflict.json" <<'PY' || fail "conflicting Claude owner evidence reused metadata cache aliases"
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    items = json.load(handle)["accounts"]
+claude = next(item for item in items if item["provider"] == "claude")
+assert claude["stale"] is False
+assert claude["snapshot"] is None
+assert claude["status"] == "network_error"
+PY
+[[ ! -f "$claude_cache" ]] || fail "conflicting Claude owner evidence retained a stale cache"
+
 write_claude_metadata account-3 "Another owner"
 claude_identity >/dev/null
 [[ ! -f "$claude_cache" ]] || fail "Claude cache survived an owner mismatch"
@@ -268,6 +354,36 @@ swiftbar_title="${swiftbar_output%%$'\n'*}"
 if grep -Eq '^Claude( |$)' <<<"$swiftbar_output"; then
   fail "SwiftBar rendered a Claude section without a Claude row"
 fi
+
+(
+  HOME="$TEST_HOME"
+  # shellcheck source=../codex-accounts.sh
+  source "$COMMAND"
+  rotation_dir="$TEST_HOME/rotation-fixture"
+  mkdir -p "$rotation_dir"
+  cat >"$rotation_dir/saved.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"old"}}
+EOF
+  cat >"$rotation_dir/refreshed.auth.json" <<EOF
+{"last_refresh":"2026-08-27T01:00:00Z","tokens":{"id_token":"$subject_only_token","access_token":"$explicit_account_token","refresh_token":"new"}}
+EOF
+  copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" || \
+    fail "matching legacy credential rotation was discarded"
+  grep -q '"refresh_token":"new"' "$rotation_dir/saved.auth.json" || \
+    fail "matching legacy credential rotation was not reconciled"
+
+  cat >"$rotation_dir/saved.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$shared_subject_account_a","refresh_token":"owner-a"}}
+EOF
+  cat >"$rotation_dir/refreshed.auth.json" <<EOF
+{"last_refresh":"2026-08-27T01:00:00Z","tokens":{"id_token":"$shared_subject_account_b","refresh_token":"owner-b"}}
+EOF
+  if copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json"; then
+    fail "different explicit owners sharing a subject reconciled credentials"
+  fi
+  grep -q '"refresh_token":"owner-a"' "$rotation_dir/saved.auth.json" || \
+    fail "owner mismatch overwrote saved credentials"
+)
 
 export CODEX_ACCOUNT_SWITCH_BIN=/bin/true
 # shellcheck source=../plugins/swiftbar/ai-usage.1m.sh

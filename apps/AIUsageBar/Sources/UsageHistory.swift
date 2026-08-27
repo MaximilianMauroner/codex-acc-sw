@@ -33,6 +33,10 @@ struct HistorySample: Codable, Identifiable {
 struct UsageHistory: Codable {
     private(set) var samplesByAccount: [String: [HistorySample]] = [:]
 
+    init(samplesByAccount: [String: [HistorySample]] = [:]) {
+        self.samplesByAccount = samplesByAccount
+    }
+
     static func load() -> UsageHistory {
         let url = historyURL()
         guard let data = try? Data(contentsOf: url) else {
@@ -42,11 +46,25 @@ struct UsageHistory: Codable {
     }
 
     mutating func record(accounts: [UsageAccount]) {
+        let aliasCounts = accounts
+            .flatMap(\.historyAliasIDs)
+            .reduce(into: [String: Int]()) { counts, alias in
+                counts[alias, default: 0] += 1
+            }
         for account in accounts {
             guard account.status == "ok", !account.stale, let snapshot = account.snapshot else {
                 continue
             }
             guard let historyID = account.historyID else { continue }
+            var samples = samplesByAccount[historyID] ?? []
+            for aliasID in account.historyAliasIDs where aliasCounts[aliasID] == 1 {
+                guard aliasID != historyID, let legacySamples = samplesByAccount.removeValue(forKey: aliasID) else {
+                    continue
+                }
+                samples.append(contentsOf: legacySamples)
+                samples.sort { $0.timestamp < $1.timestamp }
+                samples = Array(samples.suffix(240))
+            }
             let timestamp = snapshot.lastSeenDate ?? Date()
             let sample = HistorySample(
                 timestamp: timestamp,
@@ -57,7 +75,6 @@ struct UsageHistory: Codable {
                 currentWindowMinutes: BudgetPeriod.current.windowMinutes(in: snapshot),
                 weeklyWindowMinutes: BudgetPeriod.weekly.windowMinutes(in: snapshot)
             )
-            var samples = samplesByAccount[historyID] ?? []
             if let last = samples.last, abs(last.timestamp.timeIntervalSince(timestamp)) < 30 {
                 samples[samples.count - 1] = sample
             } else {

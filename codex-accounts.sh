@@ -215,7 +215,7 @@ atomic_copy_auth() {
 copy_newer_matching_auth() {
   local source="$1"
   local destination="$2"
-  local source_account_id destination_account_id source_refresh destination_refresh
+  local source_refresh destination_refresh
   [[ -f "$source" ]] || return 1
   if [[ ! -f "$destination" ]]; then
     atomic_copy_auth "$source" "$destination"
@@ -223,9 +223,7 @@ copy_newer_matching_auth() {
   fi
   cmp -s "$source" "$destination" && return 0
 
-  source_account_id="$(account_id_for_auth_path "$source")"
-  destination_account_id="$(account_id_for_auth_path "$destination")"
-  [[ -n "${source_account_id:-}" && "$source_account_id" == "$destination_account_id" ]] || return 1
+  auth_owner_evidence_matches "$source" "$destination" || return 1
 
   source_refresh="$(auth_last_refresh_epoch "$source")"
   destination_refresh="$(auth_last_refresh_epoch "$destination")"
@@ -238,7 +236,78 @@ PY
   fi
 }
 
-account_identity_for_auth_path() {
+auth_owner_evidence_matches() {
+  python3 - "$1" "$2" <<'PY'
+import base64
+import binascii
+import json
+import os
+import sys
+
+account_claim_keys = (
+    "account_id",
+    "chatgpt_account_id",
+    "https://api.openai.com/auth/chatgpt_account_id",
+)
+
+
+def evidence(path):
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            auth = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(auth, dict):
+        return None
+    tokens = auth.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        return None
+    accounts = set()
+    subjects = set()
+    top_level = str(tokens.get("account_id") or "").strip()
+    if top_level:
+        accounts.add(top_level)
+    for token_name in ("id_token", "access_token"):
+        token = str(tokens.get(token_name) or "")
+        if token.count(".") < 2:
+            continue
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+            continue
+        if not isinstance(claims, dict):
+            continue
+        for key in account_claim_keys:
+            value = str(claims.get(key) or "").strip()
+            if value:
+                accounts.add(value)
+        subject = str(claims.get("sub") or "").strip()
+        if subject:
+            subjects.add(subject)
+    if len(accounts) > 1 or len(subjects) > 1:
+        return None
+    return accounts, subjects
+
+
+source = evidence(sys.argv[1])
+destination = evidence(sys.argv[2])
+if source is None or destination is None:
+    raise SystemExit(1)
+source_accounts, source_subjects = source
+destination_accounts, destination_subjects = destination
+if source_accounts and destination_accounts:
+    matches = bool(source_accounts.intersection(destination_accounts))
+else:
+    matches = bool(source_subjects and source_subjects == destination_subjects)
+raise SystemExit(0 if matches else 1)
+PY
+}
+
+account_identity_evidence_for_auth_path() {
   python3 - "$1" <<'PY'
 import base64
 import binascii
@@ -247,19 +316,24 @@ import json
 import os
 import sys
 
+def emit_empty():
+    print(json.dumps({"account_identity": None, "account_identity_aliases": []}, separators=(",", ":")))
+    raise SystemExit(0)
+
+
 path = sys.argv[1]
 if not os.path.isfile(path):
-    raise SystemExit(0)
+    emit_empty()
 try:
     with open(path, "r", encoding="utf-8") as handle:
         auth = json.load(handle)
 except (OSError, json.JSONDecodeError):
-    raise SystemExit(0)
+    emit_empty()
 if not isinstance(auth, dict):
-    raise SystemExit(0)
+    emit_empty()
 tokens = auth.get("tokens") or {}
 if not isinstance(tokens, dict):
-    raise SystemExit(0)
+    emit_empty()
 
 account_claim_keys = (
     "account_id",
@@ -291,16 +365,33 @@ for token_name in ("id_token", "access_token"):
     if subject:
         subject_claims.add(subject)
 
-if len(account_claims) > 1 or len(subject_claims) > 1:
-    raise SystemExit(0)
-if len(subject_claims) == 1:
-    value = next(iter(subject_claims))
-    source = f"claim:sub:{value}"
-    print(hashlib.sha256(source.encode("utf-8")).hexdigest())
-elif len(account_claims) == 1:
-    value = next(iter(account_claims))
-    print(hashlib.sha256(value.encode("utf-8")).hexdigest())
+identity = None
+aliases = []
+if len(account_claims) <= 1 and len(subject_claims) <= 1:
+    subject_identity = None
+    if subject_claims:
+        subject = next(iter(subject_claims))
+        subject_identity = hashlib.sha256(f"claim:sub:{subject}".encode("utf-8")).hexdigest()
+    if top_level_account_id:
+        identity = hashlib.sha256(top_level_account_id.encode("utf-8")).hexdigest()
+    elif account_claims:
+        account_id = next(iter(account_claims))
+        identity = hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+        if subject_identity and subject_identity != identity:
+            aliases.append(subject_identity)
+    else:
+        identity = subject_identity
+print(json.dumps({
+    "account_identity": identity,
+    "account_identity_aliases": aliases,
+}, separators=(",", ":")))
 PY
+}
+
+account_identity_for_auth_path() {
+  local evidence_json
+  evidence_json="$(account_identity_evidence_for_auth_path "$1")"
+  json_field_value "$evidence_json" "account_identity"
 }
 
 claude_account_evidence() {
@@ -459,7 +550,10 @@ import urllib.request
 
 timeout_seconds = float(sys.argv[1])
 credential_service = sys.argv[2]
-usage_url = "https://api.anthropic.com/api/oauth/usage"
+usage_url = os.environ.get(
+    "CODEX_ACCOUNT_SWITCH_CLAUDE_USAGE_URL",
+    "https://api.anthropic.com/api/oauth/usage",
+)
 
 
 def now_iso():
@@ -554,7 +648,7 @@ def owner_identity(credentials=None, access_token=None):
         trusted_accounts = {source["account_id"] for source in trusted if source.get("account_id")}
         trusted_organizations = {source["organization_id"] for source in trusted if source.get("organization_id")}
         if len(trusted_accounts) > 1 or len(trusted_organizations) > 1:
-            return None, [], []
+            return None, [], [], "conflict"
         if metadata.get("account_id") and trusted_accounts and metadata["account_id"] not in trusted_accounts:
             metadata = {}
         elif metadata.get("organization_id") and trusted_organizations and metadata["organization_id"] not in trusted_organizations:
@@ -565,13 +659,14 @@ def owner_identity(credentials=None, access_token=None):
     account_ids = {source["account_id"] for source in sources if source.get("account_id")}
     organization_ids = {source["organization_id"] for source in sources if source.get("organization_id")}
     if len(account_ids) > 1 or len(organization_ids) > 1:
-        return None, [], []
+        return None, [], [], "conflict"
     if not account_ids:
         organization_aliases = sorted(
             hashlib.sha256(f"{credential_service}:organization_id:{value}".encode("utf-8")).hexdigest()
             for value in organization_ids
         )
-        return None, [], organization_aliases
+        state = "resolved" if organization_aliases else "unavailable"
+        return None, [], organization_aliases, state
     owner = {"account_id": next(iter(account_ids))}
     source = json.dumps(
         {"credential_service": credential_service, "owner": owner},
@@ -588,6 +683,7 @@ def owner_identity(credentials=None, access_token=None):
         hashlib.sha256(source.encode("utf-8")).hexdigest(),
         aliases("account_id", account_ids),
         aliases("organization_id", organization_ids),
+        "resolved",
     )
 
 
@@ -598,6 +694,7 @@ def emit(
     account_identity=None,
     account_alias_hashes=None,
     organization_alias_hashes=None,
+    owner_evidence_state="unknown",
 ):
     print(
         json.dumps(
@@ -608,6 +705,7 @@ def emit(
                 "account_identity": account_identity,
                 "account_alias_hashes": account_alias_hashes or [],
                 "organization_alias_hashes": organization_alias_hashes or [],
+                "owner_evidence_state": owner_evidence_state,
             },
             separators=(",", ":"),
         )
@@ -617,7 +715,7 @@ def emit(
 
 if shutil.which("security") is None:
     raise SystemExit(
-        emit("missing_security", "macOS security command is not available.")
+        emit("missing_security", "macOS security command is not available.", owner_evidence_state="keychain_unavailable")
     )
 
 try:
@@ -629,13 +727,14 @@ try:
         timeout=timeout_seconds,
     )
 except subprocess.TimeoutExpired:
-    raise SystemExit(emit("network_error", "Timed out reading Claude credentials."))
+    raise SystemExit(emit("network_error", "Timed out reading Claude credentials.", owner_evidence_state="keychain_unavailable"))
 
 if completed.returncode != 0 or not completed.stdout.strip():
     raise SystemExit(
         emit(
             "missing_credentials",
             "Claude Code credentials were not found. Open Claude Code and sign in.",
+            owner_evidence_state="keychain_unavailable",
         )
     )
 
@@ -643,7 +742,7 @@ try:
     credentials = json.loads(completed.stdout)
 except json.JSONDecodeError:
     raise SystemExit(
-        emit("missing_token", "Claude Code credentials could not be parsed.")
+        emit("missing_token", "Claude Code credentials could not be parsed.", owner_evidence_state="invalid_credentials")
     )
 
 access_token = (
@@ -651,10 +750,10 @@ access_token = (
 ).strip()
 if not access_token:
     raise SystemExit(
-        emit("missing_token", "Claude Code access token is missing. Sign in again.")
+        emit("missing_token", "Claude Code access token is missing. Sign in again.", owner_evidence_state="invalid_credentials")
     )
 
-account_identity, account_alias_hashes, organization_alias_hashes = owner_identity(credentials, access_token)
+account_identity, account_alias_hashes, organization_alias_hashes, owner_evidence_state = owner_identity(credentials, access_token)
 
 request = urllib.request.Request(
     usage_url,
@@ -671,23 +770,23 @@ try:
 except urllib.error.HTTPError as exc:
     if exc.code in (401, 403):
         raise SystemExit(
-            emit("unauthorized", "Claude Code login expired. Sign in again.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes)
+            emit("unauthorized", "Claude Code login expired. Sign in again.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
         )
     raise SystemExit(
-        emit("network_error", f"Claude usage API returned HTTP {exc.code}.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes)
+        emit("network_error", f"Claude usage API returned HTTP {exc.code}.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
     )
 except urllib.error.URLError as exc:
-    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes))
+    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state))
 except TimeoutError:
-    raise SystemExit(emit("network_error", "Claude usage API request timed out.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes))
+    raise SystemExit(emit("network_error", "Claude usage API request timed out.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state))
 except json.JSONDecodeError:
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes)
+        emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
     )
 
 if payload.get("error"):
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes)
+        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
     )
 
 five_hour = payload.get("five_hour") or {}
@@ -697,7 +796,7 @@ seven_day_util = seven_day.get("utilization")
 
 if five_hour_util is None and seven_day_util is None:
     raise SystemExit(
-        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes)
+        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
     )
 
 snapshot = {
@@ -715,7 +814,7 @@ snapshot = {
     "weekly_resets_at": seven_day.get("resets_at"),
 }
 
-raise SystemExit(emit("ok", "", snapshot, account_identity, account_alias_hashes, organization_alias_hashes))
+raise SystemExit(emit("ok", "", snapshot, account_identity, account_alias_hashes, organization_alias_hashes, owner_evidence_state))
 PY
 }
 
@@ -1165,6 +1264,7 @@ append_widget_state_line() {
   local stale="${6:-0}"
   local snapshot_json="${7:-}"
   local account_identity="${8:-}"
+  local account_identity_aliases_json="${9:-[]}"
 
   python3 - \
     "$provider" \
@@ -1174,11 +1274,12 @@ append_widget_state_line() {
     "$message" \
     "$stale" \
     "$snapshot_json" \
-    "$account_identity" <<'PY'
+    "$account_identity" \
+    "$account_identity_aliases_json" <<'PY'
 import json
 import sys
 
-provider, name, is_active, status, message, stale, snapshot_raw, account_identity = sys.argv[1:]
+provider, name, is_active, status, message, stale, snapshot_raw, account_identity, aliases_raw = sys.argv[1:]
 snapshot = None
 if snapshot_raw:
     try:
@@ -1192,6 +1293,7 @@ print(
             "provider": provider,
             "name": name,
             "account_identity": account_identity or None,
+            "account_identity_aliases": json.loads(aliases_raw),
             "is_active": is_active == "1",
             "status": status,
             "message": message,
@@ -1212,7 +1314,7 @@ collect_codex_widget_lines() {
   local reconcile_saved_auth="${5:-0}"
 
   shopt -s nullglob
-  local f base auth_path saved_auth_path is_active account_identity result_json status message snapshot_json cached_snapshot_json cache_path
+  local f base auth_path saved_auth_path is_active account_identity account_identity_aliases_json identity_evidence_json result_json status message snapshot_json cached_snapshot_json cache_path
   for f in "$auth_source_dir"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
@@ -1222,12 +1324,14 @@ collect_codex_widget_lines() {
     if [[ -n "${active_current:-}" && "$base" == "$active_current" ]]; then
       is_active=1
     fi
-    account_identity="$(account_identity_for_auth_path "$auth_path")"
+    identity_evidence_json="$(account_identity_evidence_for_auth_path "$auth_path")"
+    account_identity="$(json_field_value "$identity_evidence_json" "account_identity")"
+    account_identity_aliases_json="$(json_field_json_value "$identity_evidence_json" "account_identity_aliases")"
 
     cache_path="$(usage_cache_path_for "$base")"
     if [[ "$mode" == "cached" ]]; then
       if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
-        append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$cached_snapshot_json" "$account_identity"
+        append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$cached_snapshot_json" "$account_identity" "$account_identity_aliases_json"
       else
         append_widget_state_line \
           "codex" \
@@ -1237,7 +1341,8 @@ collect_codex_widget_lines() {
           "No cached Codex usage yet. A background refresh is running." \
           "0" \
           "" \
-          "$account_identity"
+          "$account_identity" \
+          "$account_identity_aliases_json"
       fi
       continue
     fi
@@ -1265,7 +1370,7 @@ collect_codex_widget_lines() {
       if [[ "$reconcile_saved_auth" != "1" ]]; then
         write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
       fi
-      append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json" "$account_identity"
+      append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json" "$account_identity" "$account_identity_aliases_json"
       continue
     fi
 
@@ -1278,7 +1383,8 @@ collect_codex_widget_lines() {
         "$message Showing cached data." \
         "1" \
         "$cached_snapshot_json" \
-        "$account_identity"
+        "$account_identity" \
+        "$account_identity_aliases_json"
     else
       append_widget_state_line \
         "codex" \
@@ -1288,7 +1394,8 @@ collect_codex_widget_lines() {
         "$message" \
         "0" \
         "" \
-        "$account_identity"
+        "$account_identity" \
+        "$account_identity_aliases_json"
     fi
   done
 }
@@ -1296,7 +1403,7 @@ collect_codex_widget_lines() {
 collect_claude_widget_line() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local mode="${2:-live}"
-  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity account_aliases_json organization_aliases_json evidence_json cache_envelope metadata_account_aliases_json metadata_organization_aliases_json failure_account_aliases_json failure_organization_aliases_json
+  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity account_aliases_json organization_aliases_json evidence_json cache_envelope metadata_account_aliases_json metadata_organization_aliases_json failure_account_aliases_json failure_organization_aliases_json owner_evidence_state
 
   cache_path="$(claude_usage_cache_path)"
   evidence_json="$(claude_account_evidence)"
@@ -1344,7 +1451,8 @@ collect_claude_widget_line() {
   account_identity="$(json_field_value "$result_json" "account_identity")"
   failure_account_aliases_json="$(json_field_json_value "$result_json" "account_alias_hashes")"
   failure_organization_aliases_json="$(json_field_json_value "$result_json" "organization_alias_hashes")"
-  if [[ "$failure_account_aliases_json" == "[]" && "$failure_organization_aliases_json" == "[]" ]]; then
+  owner_evidence_state="$(json_field_value "$result_json" "owner_evidence_state")"
+  if [[ "$owner_evidence_state" == "keychain_unavailable" && "$failure_account_aliases_json" == "[]" && "$failure_organization_aliases_json" == "[]" ]]; then
     account_aliases_json="$metadata_account_aliases_json"
     organization_aliases_json="$metadata_organization_aliases_json"
   else
@@ -2891,4 +2999,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

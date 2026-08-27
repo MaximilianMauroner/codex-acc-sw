@@ -16,6 +16,7 @@ struct UsageAccount: Decodable, Identifiable {
     let provider: String
     let name: String
     let accountIdentity: String?
+    let accountIdentityAliases: [String]?
     let isActive: Bool
     let status: String
     let message: String
@@ -31,9 +32,17 @@ struct UsageAccount: Decodable, Identifiable {
         return "\(provider):\(accountIdentity)"
     }
 
+    var historyAliasIDs: [String] {
+        (accountIdentityAliases ?? []).map { "\(provider):\($0)" }
+    }
+
     var preferenceID: String? {
         guard let accountIdentity, !accountIdentity.isEmpty else { return nil }
         return "\(provider):owner:\(accountIdentity)"
+    }
+
+    var preferenceAliasIDs: [String] {
+        (accountIdentityAliases ?? []).map { "\(provider):owner:\($0)" }
     }
 
     var isClaude: Bool {

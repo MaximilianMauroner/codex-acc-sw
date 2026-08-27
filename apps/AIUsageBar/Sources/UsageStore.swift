@@ -219,12 +219,20 @@ final class UsageStore: ObservableObject {
     }
 
     private func apply(payload: UsagePayload) {
+        migrateStableTopBarPreferences(accounts: payload.accounts)
         discardAmbiguousLegacyTopBarPreferences(accounts: payload.accounts)
         self.payload = payload
         self.errorMessage = nil
         history.record(accounts: payload.accounts)
         history.save()
         updateStatusSummary()
+    }
+
+    private func migrateStableTopBarPreferences(accounts: [UsageAccount]) {
+        let migrated = TopBarPreferences.migratedHiddenIDs(hiddenTopBarAccountIDs, accounts: accounts)
+        guard migrated != hiddenTopBarAccountIDs else { return }
+        hiddenTopBarAccountIDs = migrated
+        TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
     }
 
     private func discardAmbiguousLegacyTopBarPreferences(accounts: [UsageAccount]) {
@@ -356,7 +364,7 @@ final class UsageStore: ObservableObject {
     }
 }
 
-private enum TopBarPreferences {
+enum TopBarPreferences {
     private static let hiddenIDsKey = "AIUsageBar.hiddenTopBarAccountIDs"
 
     static func loadHiddenIDs() -> Set<String> {
@@ -366,5 +374,23 @@ private enum TopBarPreferences {
 
     static func saveHiddenIDs(_ ids: Set<String>) {
         UserDefaults.standard.set(Array(ids).sorted(), forKey: hiddenIDsKey)
+    }
+
+    static func migratedHiddenIDs(_ ids: Set<String>, accounts: [UsageAccount]) -> Set<String> {
+        let aliasCounts = accounts
+            .flatMap(\.preferenceAliasIDs)
+            .reduce(into: [String: Int]()) { counts, alias in
+                counts[alias, default: 0] += 1
+            }
+        var result = ids
+        for account in accounts {
+            guard let preferenceID = account.preferenceID else { continue }
+            for aliasID in account.preferenceAliasIDs where aliasCounts[aliasID] == 1 {
+                if result.remove(aliasID) != nil {
+                    result.insert(preferenceID)
+                }
+            }
+        }
+        return result
     }
 }

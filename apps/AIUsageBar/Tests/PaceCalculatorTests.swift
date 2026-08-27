@@ -73,6 +73,65 @@ final class PaceCalculatorTests: XCTestCase {
         XCTAssertNil(decoded.weeklyWindowMinutes)
     }
 
+    func testHistoryConsumesOneUnambiguousSubjectAlias() {
+        let legacyID = "codex:legacy-subject"
+        let canonicalID = "codex:strong-account"
+        let legacySample = HistorySample(
+            timestamp: Date().addingTimeInterval(-60),
+            currentRemaining: 95,
+            weeklyRemaining: nil
+        )
+        var history = UsageHistory(samplesByAccount: [legacyID: [legacySample]])
+        let account = makeAccount(
+            name: "upgraded",
+            identity: "strong-account",
+            aliases: ["legacy-subject"]
+        )
+
+        history.record(accounts: [account])
+
+        XCTAssertEqual(history.samples(for: account).count, 2)
+        XCTAssertNil(history.samplesByAccount[legacyID])
+        XCTAssertNotNil(history.samplesByAccount[canonicalID])
+    }
+
+    func testSharedSubjectAliasDoesNotMergeDifferentAccounts() {
+        let legacyID = "codex:shared-subject"
+        let legacySample = HistorySample(
+            timestamp: Date().addingTimeInterval(-60),
+            currentRemaining: 95,
+            weeklyRemaining: nil
+        )
+        var history = UsageHistory(samplesByAccount: [legacyID: [legacySample]])
+        let accountA = makeAccount(name: "a", identity: "account-a", aliases: ["shared-subject"])
+        let accountB = makeAccount(name: "b", identity: "account-b", aliases: ["shared-subject"])
+
+        history.record(accounts: [accountA, accountB])
+
+        XCTAssertEqual(history.samples(for: accountA).count, 1)
+        XCTAssertEqual(history.samples(for: accountB).count, 1)
+        XCTAssertEqual(history.samplesByAccount[legacyID]?.count, 1)
+    }
+
+    func testTopBarPreferenceMigrationRejectsAmbiguousAlias() {
+        let aliasID = "codex:owner:shared-subject"
+        let accountA = makeAccount(name: "a", identity: "account-a", aliases: ["shared-subject"])
+        let accountB = makeAccount(name: "b", identity: "account-b", aliases: ["shared-subject"])
+
+        let migrated = TopBarPreferences.migratedHiddenIDs([aliasID], accounts: [accountA, accountB])
+
+        XCTAssertEqual(migrated, Set([aliasID]))
+    }
+
+    func testTopBarPreferenceConsumesOneUnambiguousAlias() {
+        let aliasID = "codex:owner:legacy-subject"
+        let account = makeAccount(name: "upgraded", identity: "strong-account", aliases: ["legacy-subject"])
+
+        let migrated = TopBarPreferences.migratedHiddenIDs([aliasID], accounts: [account])
+
+        XCTAssertEqual(migrated, Set(["codex:owner:strong-account"]))
+    }
+
     private func makeSnapshot(now: Date, remaining: Double, reset: Date) -> UsageSnapshot {
         let formatter = ISO8601DateFormatter()
         return UsageSnapshot(
@@ -84,6 +143,24 @@ final class PaceCalculatorTests: XCTestCase {
             weeklyWindowMinutes: nil,
             currentResetsAt: formatter.string(from: reset),
             weeklyResetsAt: nil
+        )
+    }
+
+    private func makeAccount(name: String, identity: String, aliases: [String]) -> UsageAccount {
+        UsageAccount(
+            provider: "codex",
+            name: name,
+            accountIdentity: identity,
+            accountIdentityAliases: aliases,
+            isActive: false,
+            status: "ok",
+            message: "",
+            stale: false,
+            snapshot: makeSnapshot(
+                now: Date(),
+                remaining: 90,
+                reset: Date().addingTimeInterval(4 * 60 * 60)
+            )
         )
     }
 }
