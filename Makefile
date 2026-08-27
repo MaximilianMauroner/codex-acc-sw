@@ -26,10 +26,13 @@ ALIAS_DST = $(DESTDIR)$(BINDIR)/acc-sw
 SWIFTBAR_PLUGIN_DST = $(SWIFTBAR_PLUGIN_DIR)/ai-usage.1m.sh
 MACOS_APP_INSTALL_DST = $(MACOS_APP_INSTALL_DIR)/$(MACOS_APP_BUNDLE_NAME)
 
-.PHONY: all install uninstall install-swiftbar-widget uninstall-swiftbar-widget build-macos-menu-app install-macos-menu-app open-macos-menu-app uninstall-macos-menu-app
+.PHONY: all test install uninstall install-swiftbar-widget uninstall-swiftbar-widget build-macos-menu-app install-macos-menu-app open-macos-menu-app uninstall-macos-menu-app
 
 all:
 	@echo "Nothing to build. Use 'make install'."
+
+test:
+	bash tests/regression.sh
 
 install:
 	$(INSTALL) -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(LIBEXECDIR)/scripts"

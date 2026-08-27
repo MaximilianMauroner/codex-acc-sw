@@ -546,6 +546,7 @@ private struct ActionsScreen: View {
 
     private func isValidAccountName(_ name: String) -> Bool {
         !name.isEmpty
+            && !name.hasPrefix(".")
             && !name.contains("/")
             && !name.contains(":")
             && name != "."

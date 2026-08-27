@@ -239,10 +239,21 @@ try:
         oauth_account = json.load(handle).get("oauthAccount")
 except (OSError, json.JSONDecodeError, AttributeError):
     raise SystemExit(0)
-if not oauth_account:
+if not isinstance(oauth_account, dict):
+    raise SystemExit(0)
+stable_keys = (
+    "accountUuid", "accountUUID", "accountId", "account_id",
+    "organizationUuid", "organizationUUID", "organizationId", "organization_id",
+)
+owner = {
+    key: str(oauth_account[key])
+    for key in stable_keys
+    if oauth_account.get(key) not in (None, "")
+}
+if not owner:
     raise SystemExit(0)
 identity_source = json.dumps(
-    {"credential_service": credential_service, "oauth_account": oauth_account},
+    {"credential_service": credential_service, "owner": owner},
     sort_keys=True,
     separators=(",", ":"),
     ensure_ascii=False,
@@ -335,8 +346,12 @@ fetch_claude_status_json() {
   local credential_service="${CODEX_ACCOUNT_SWITCH_CLAUDE_CREDENTIAL_SERVICE:-Claude Code-credentials}"
 
   python3 - "$timeout_seconds" "$credential_service" <<'PY'
+import base64
+import binascii
 import datetime as dt
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -357,13 +372,85 @@ def now_iso():
     )
 
 
-def emit(status, message, snapshot=None):
+def metadata_owner():
+    try:
+        with open(os.path.expanduser("~/.claude.json"), "r", encoding="utf-8") as handle:
+            account = json.load(handle).get("oauthAccount")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+    if not isinstance(account, dict):
+        return {}
+    keys = (
+        "accountUuid", "accountUUID", "accountId", "account_id",
+        "organizationUuid", "organizationUUID", "organizationId", "organization_id",
+    )
+    return {key: str(account[key]) for key in keys if account.get(key) not in (None, "")}
+
+
+def credential_owner(credentials):
+    stable_keys = {
+        "accountUuid", "accountUUID", "accountId", "account_id",
+        "organizationUuid", "organizationUUID", "organizationId", "organization_id",
+        "org_id", "sub",
+    }
+    found = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in stable_keys and child not in (None, "") and not isinstance(child, (dict, list)):
+                    found.append((key, str(child)))
+                elif isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(credentials)
+    return {key: value for key, value in sorted(set(found))}
+
+
+def token_owner(token):
+    if not token or token.count(".") < 2:
+        return {}
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return {}
+    keys = (
+        "sub", "account_uuid", "account_id", "organization_uuid",
+        "organization_id", "org_id",
+    )
+    return {key: str(claims[key]) for key in keys if claims.get(key) not in (None, "")}
+
+
+def owner_identity(credentials=None, access_token=None):
+    owner = credential_owner(credentials or {})
+    if not owner:
+        owner = token_owner(access_token)
+    if not owner:
+        owner = metadata_owner()
+    if not owner:
+        return None
+    source = json.dumps(
+        {"credential_service": credential_service, "owner": owner},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def emit(status, message, snapshot=None, account_identity=None):
     print(
         json.dumps(
             {
                 "status": status,
                 "message": message,
                 "snapshot": snapshot,
+                "account_identity": account_identity,
             },
             separators=(",", ":"),
         )
@@ -410,6 +497,8 @@ if not access_token:
         emit("missing_token", "Claude Code access token is missing. Sign in again.")
     )
 
+account_identity = owner_identity(credentials, access_token)
+
 request = urllib.request.Request(
     usage_url,
     headers={
@@ -425,23 +514,23 @@ try:
 except urllib.error.HTTPError as exc:
     if exc.code in (401, 403):
         raise SystemExit(
-            emit("unauthorized", "Claude Code login expired. Sign in again.")
+            emit("unauthorized", "Claude Code login expired. Sign in again.", account_identity=account_identity)
         )
     raise SystemExit(
-        emit("network_error", f"Claude usage API returned HTTP {exc.code}.")
+        emit("network_error", f"Claude usage API returned HTTP {exc.code}.", account_identity=account_identity)
     )
 except urllib.error.URLError as exc:
-    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}"))
+    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}", account_identity=account_identity))
 except TimeoutError:
-    raise SystemExit(emit("network_error", "Claude usage API request timed out."))
+    raise SystemExit(emit("network_error", "Claude usage API request timed out.", account_identity=account_identity))
 except json.JSONDecodeError:
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned invalid JSON.")
+        emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity)
     )
 
 if payload.get("error"):
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned an error payload.")
+        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity)
     )
 
 five_hour = payload.get("five_hour") or {}
@@ -451,7 +540,7 @@ seven_day_util = seven_day.get("utilization")
 
 if five_hour_util is None and seven_day_util is None:
     raise SystemExit(
-        emit("invalid_response", "Claude usage payload has no utilization data.")
+        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity)
     )
 
 snapshot = {
@@ -469,7 +558,7 @@ snapshot = {
     "weekly_resets_at": seven_day.get("resets_at"),
 }
 
-raise SystemExit(emit("ok", "", snapshot))
+raise SystemExit(emit("ok", "", snapshot, account_identity))
 PY
 }
 
@@ -890,13 +979,15 @@ collect_codex_widget_lines() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local active_current="${2:-}"
   local mode="${3:-live}"
+  local auth_source_dir="${4:-$DATA_DIR}"
+  local reconcile_saved_auth="${5:-0}"
 
   shopt -s nullglob
-  local f base auth_path is_active account_identity result_json status message snapshot_json cached_snapshot_json cache_path
-  for f in "$DATA_DIR"/*.auth.json; do
+  local f base auth_path saved_auth_path is_active account_identity result_json status message snapshot_json cached_snapshot_json cache_path
+  for f in "$auth_source_dir"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
-    auth_path="$(auth_path_for "$base")"
+    auth_path="$f"
     is_active=0
 
     if [[ -n "${active_current:-}" && "$base" == "$active_current" ]]; then
@@ -924,10 +1015,27 @@ collect_codex_widget_lines() {
 
     result_json="$(fetch_live_usage_result_json "$auth_path" "$timeout_seconds")"
     status="$(json_field_value "$result_json" "status")"
+    snapshot_json=""
     message="$(json_field_value "$result_json" "message")"
     if [[ "$status" == "ok" ]]; then
       snapshot_json="$(json_snapshot_value "$result_json")"
-      write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
+    fi
+
+    if [[ "$reconcile_saved_auth" == "1" ]]; then
+      acquire_auth_store_lock
+      saved_auth_path="$(auth_path_for "$base")"
+      if [[ -f "$saved_auth_path" ]] && copy_newer_matching_auth "$auth_path" "$saved_auth_path"; then
+        if [[ "$status" == "ok" ]]; then
+          write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
+        fi
+      fi
+      release_auth_store_lock
+    fi
+
+    if [[ "$status" == "ok" ]]; then
+      if [[ "$reconcile_saved_auth" != "1" ]]; then
+        write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
+      fi
       append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json" "$account_identity"
       continue
     fi
@@ -981,12 +1089,14 @@ collect_claude_widget_line() {
   fi
 
   if result_json="$(fetch_claude_status_json "$timeout_seconds" 2>/dev/null)"; then
+    account_identity="$(json_field_value "$result_json" "account_identity")"
     snapshot_json="$(json_snapshot_value "$result_json")" || return 0
     write_usage_cache_snapshot "$(claude_usage_cache_path)" "$snapshot_json"
     append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$snapshot_json" "$account_identity"
     return 0
   fi
 
+  account_identity="$(json_field_value "$result_json" "account_identity")"
   status="$(json_field_value "$result_json" "status")"
   message="$(json_field_value "$result_json" "message")"
   [[ -n "${status:-}" ]] || status="network_error"
@@ -1057,16 +1167,30 @@ format_usage_state_json() {
 build_widget_snapshot_json() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local mode="${2:-live}"
-  local active_current tmp status
+  local active_current tmp status snapshot_dir="" auth_source_dir="$DATA_DIR" reconcile_saved_auth=0 f
 
   ensure_dirs
-  load_state
   load_config
-  active_current="$(resolved_current_account_name)"
+  if [[ "$mode" == "live" ]]; then
+    snapshot_dir="$(mktemp -d)"
+    acquire_auth_store_lock
+    load_state
+    active_current="$(resolved_current_account_name)"
+    shopt -s nullglob
+    for f in "$DATA_DIR"/*.auth.json; do
+      atomic_copy_auth "$f" "$snapshot_dir/$(basename -- "$f")"
+    done
+    release_auth_store_lock
+    auth_source_dir="$snapshot_dir"
+    reconcile_saved_auth=1
+  else
+    load_state
+    active_current="$(resolved_current_account_name)"
+  fi
   tmp="$(mktemp)"
 
   {
-    collect_codex_widget_lines "$timeout_seconds" "$active_current" "$mode"
+    collect_codex_widget_lines "$timeout_seconds" "$active_current" "$mode" "$auth_source_dir" "$reconcile_saved_auth"
     if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
       collect_claude_widget_line "$timeout_seconds" "$mode"
     fi
@@ -1108,6 +1232,9 @@ PY
     status=$?
   fi
   rm -f "$tmp"
+  if [[ -n "$snapshot_dir" ]]; then
+    rm -rf "$snapshot_dir"
+  fi
   return "$status"
 }
 
@@ -1918,6 +2045,7 @@ validate_account_name() {
   case "$name" in
     [Hh][Ee][Ll][Pp]|-[Hh]|--[Hh][Ee][Ll][Pp]) die "'${name}' is reserved and cannot be used as an account name." ;;
   esac
+  [[ "$name" != .* ]] || die "Account names cannot start with '.'."
   [[ "$name" != */* && "$name" != *:* && "$name" != "." && "$name" != ".." ]] || \
     die "Account names cannot contain '/' or ':' and cannot be '.' or '..'."
 }
@@ -2074,7 +2202,6 @@ cmd_current() {
 
 cmd_save() {
   # Save only the currently logged-in account auth under a name.
-  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} save [NAME]
@@ -2084,6 +2211,7 @@ If NAME is omitted, you will be prompted.
 EOF
     return
   fi
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
 
   ensure_dirs
   assert_auth_present_or_hint
@@ -2106,7 +2234,6 @@ EOF
 
 cmd_add() {
   # Prepare for a new login without touching config, history, logs, or sessions.
-  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} add NAME
@@ -2116,6 +2243,7 @@ then lets you run '${CODENAME} login' for the new account.
 EOF
     return
   fi
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
 
   ensure_dirs
 
@@ -2136,7 +2264,6 @@ EOF
 
 cmd_switch() {
   # Switch to a saved account by swapping only auth.json.
-  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} switch NAME
@@ -2146,6 +2273,7 @@ the saved auth for <account-name>.
 EOF
     return
   fi
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
 
   local target="${1:-}"
   [[ -z "$target" ]] && die "Usage: ${COMMAND_NAME} switch NAME"
@@ -2272,8 +2400,6 @@ EOF
 }
 
 cmd_rename() {
-  [[ -n "${1:-}" ]] && validate_account_name "$1"
-  [[ -n "${2:-}" ]] && validate_account_name "$2"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} rename OLD_NAME NEW_NAME
@@ -2283,6 +2409,8 @@ Also updates current/previous state if needed.
 EOF
     return
   fi
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
+  [[ -n "${2:-}" ]] && validate_account_name "$2"
 
   ensure_dirs
 
@@ -2321,7 +2449,6 @@ EOF
 }
 
 cmd_remove() {
-  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} remove NAME
@@ -2331,6 +2458,7 @@ The currently active account cannot be removed until you switch away from it.
 EOF
     return
   fi
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
 
   ensure_dirs
   load_state
@@ -2464,17 +2592,12 @@ main() {
 
   local cmd="${1:-help}"
   shift || true
-  local needs_auth_lock=0 arg
+  local needs_auth_lock=0
   case "$cmd" in
     status|list|current|refresh|save|add|switch|rename|remove|rm|delete)
       needs_auth_lock=1
       ;;
-    widget)
-      needs_auth_lock=1
-      for arg in "$@"; do
-        [[ "$arg" == "--cached" ]] && needs_auth_lock=0
-      done
-      ;;
+    widget) ;;
     *)
       saved_account_exists "$cmd" && needs_auth_lock=1
       ;;
@@ -2484,6 +2607,7 @@ main() {
   case "$cmd" in
     status|list) cmd_list "$@";;
     current) cmd_current "$@";;
+    refresh) cmd_refresh "$@";;
     widget) cmd_widget "$@";;
     configure|config) cmd_configure "$@";;
     save)    cmd_save "$@";;
