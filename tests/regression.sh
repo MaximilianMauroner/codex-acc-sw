@@ -58,9 +58,10 @@ identity_three="$(claude_identity)"
 
 claude_cache="$TEST_HOME/.codex/switch/usage-cache/claude/usage.json"
 metadata_alias="$(printf 'Claude Code-credentials:account_id:%s' account-2 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+organization_alias="$(printf 'Claude Code-credentials:organization_id:%s' org-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 stored_identity="$(printf 'stored-live-owner' | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 cat >"$claude_cache" <<EOF
-{"account_identity":"$stored_identity","account_alias_hashes":["$metadata_alias"],"snapshot":{"last_seen_at":"2026-08-27T00:00:00Z","current_remaining_percent":50}}
+{"account_identity":"$stored_identity","account_alias_hashes":["$metadata_alias"],"organization_alias_hashes":["$organization_alias"],"snapshot":{"last_seen_at":"2026-08-27T00:00:00Z","current_remaining_percent":50}}
 EOF
 cached_identity="$(claude_identity)"
 [[ "$cached_identity" == "$stored_identity" ]] || fail "cached Claude row did not retain its authoritative live identity"
@@ -120,6 +121,17 @@ kill -TERM "$widget_pid"
 wait "$widget_pid" || true
 if find "$TEMP_ROOT" -mindepth 1 -print -quit | grep -q .; then
   fail "widget temporary files survived TERM"
+fi
+
+HOME="$TEST_HOME" bash "$COMMAND" configure show claude off >/dev/null
+cat >"$TEST_HOME/.codex/accounts/inactive.auth.json" <<EOF
+{"tokens":{"account_id":"inactive-account"}}
+EOF
+swiftbar_output="$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format swiftbar)"
+swiftbar_title="${swiftbar_output%%$'\n'*}"
+[[ "$swiftbar_title" == "AI usage"* ]] || fail "SwiftBar title fell back to an inactive Codex account"
+if grep -Eq '^Claude( |$)' <<<"$swiftbar_output"; then
+  fail "SwiftBar rendered a Claude section without a Claude row"
 fi
 
 echo "shell regressions passed"

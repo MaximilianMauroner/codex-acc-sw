@@ -31,8 +31,8 @@ struct UsageAccount: Decodable, Identifiable {
         return "\(provider):\(accountIdentity)"
     }
 
-    var preferenceID: String {
-        guard let accountIdentity, !accountIdentity.isEmpty else { return id }
+    var preferenceID: String? {
+        guard let accountIdentity, !accountIdentity.isEmpty else { return nil }
         return "\(provider):owner:\(accountIdentity)"
     }
 

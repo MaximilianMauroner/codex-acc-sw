@@ -184,18 +184,21 @@ final class UsageStore: ObservableObject {
     }
 
     func canShowInTopBar(_ account: UsageAccount) -> Bool {
-        hasTopBarBudget(account)
+        account.preferenceID != nil && hasTopBarBudget(account)
     }
 
     func isTopBarVisible(_ account: UsageAccount) -> Bool {
-        canShowInTopBar(account) && !hiddenTopBarAccountIDs.contains(account.preferenceID)
+        guard canShowInTopBar(account) else { return false }
+        guard let preferenceID = account.preferenceID else { return true }
+        return !hiddenTopBarAccountIDs.contains(preferenceID)
     }
 
     func setTopBarVisible(_ account: UsageAccount, visible: Bool) {
+        guard let preferenceID = account.preferenceID else { return }
         if visible {
-            hiddenTopBarAccountIDs.remove(account.preferenceID)
+            hiddenTopBarAccountIDs.remove(preferenceID)
         } else {
-            hiddenTopBarAccountIDs.insert(account.preferenceID)
+            hiddenTopBarAccountIDs.insert(preferenceID)
         }
         TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
         updateStatusSummary()
@@ -212,7 +215,7 @@ final class UsageStore: ObservableObject {
     }
 
     private func apply(payload: UsagePayload) {
-        migrateLegacyTopBarPreferences(accounts: payload.accounts)
+        discardAmbiguousLegacyTopBarPreferences(accounts: payload.accounts)
         self.payload = payload
         self.errorMessage = nil
         history.record(accounts: payload.accounts)
@@ -220,14 +223,11 @@ final class UsageStore: ObservableObject {
         updateStatusSummary()
     }
 
-    private func migrateLegacyTopBarPreferences(accounts: [UsageAccount]) {
-        var changed = false
-        for account in accounts where account.preferenceID != account.id {
-            if hiddenTopBarAccountIDs.remove(account.id) != nil {
-                hiddenTopBarAccountIDs.insert(account.preferenceID)
-                changed = true
-            }
-        }
+    private func discardAmbiguousLegacyTopBarPreferences(accounts: [UsageAccount]) {
+        let legacyIDs = Set(accounts.map(\.id))
+        let originalCount = hiddenTopBarAccountIDs.count
+        hiddenTopBarAccountIDs.subtract(legacyIDs)
+        let changed = hiddenTopBarAccountIDs.count != originalCount
         if changed {
             TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
         }
@@ -291,6 +291,9 @@ final class UsageStore: ObservableObject {
     }
 
     private func topBarUnavailableReason(for account: UsageAccount) -> String {
+        if account.preferenceID == nil {
+            return "Waiting for account identity"
+        }
         if account.snapshot?.isFreePlan == true {
             return "Free plan"
         }
