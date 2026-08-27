@@ -27,6 +27,9 @@ USAGE_CACHE_DIR="${STATE_DIR}/usage-cache"
 USAGE_AUTO_REFRESH_TIMEOUT_SECONDS=3
 USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS=8
 AUTH_STORE_LOCK_DIR="${STATE_DIR}/auth-store.lock"
+WIDGET_SNAPSHOT_DIR=""
+WIDGET_LINES_FILE=""
+WIDGET_PAYLOAD_FILE=""
 
 # ------------- utils -------------
 die() { echo "[ERR] $*" >&2; exit 1; }
@@ -57,12 +60,31 @@ release_auth_store_lock() {
   rmdir "$AUTH_STORE_LOCK_DIR" 2>/dev/null || true
 }
 
+cleanup_widget_temporaries() {
+  if [[ -n "${WIDGET_PAYLOAD_FILE:-}" ]]; then
+    rm -f "$WIDGET_PAYLOAD_FILE"
+    WIDGET_PAYLOAD_FILE=""
+  fi
+  cleanup_widget_work_files
+}
+
+cleanup_widget_work_files() {
+  if [[ -n "${WIDGET_LINES_FILE:-}" ]]; then
+    rm -f "$WIDGET_LINES_FILE"
+    WIDGET_LINES_FILE=""
+  fi
+  if [[ -n "${WIDGET_SNAPSHOT_DIR:-}" ]]; then
+    rm -rf "$WIDGET_SNAPSHOT_DIR"
+    WIDGET_SNAPSHOT_DIR=""
+  fi
+}
+
 acquire_auth_store_lock() {
   local owner_pid stale_dir
   while true; do
     if mkdir "$AUTH_STORE_LOCK_DIR" 2>/dev/null; then
       printf '%s\n' "$$" > "$AUTH_STORE_LOCK_DIR/pid"
-      trap release_auth_store_lock EXIT
+      trap 'release_auth_store_lock; cleanup_widget_temporaries' EXIT
       trap 'exit 130' INT
       trap 'exit 143' TERM
       return 0
@@ -223,7 +245,7 @@ account_identity_for_auth_path() {
   printf '%s' "$account_id" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 }
 
-claude_account_identity() {
+claude_account_evidence() {
   local credential_service="${CODEX_ACCOUNT_SWITCH_CLAUDE_CREDENTIAL_SERVICE:-Claude Code-credentials}"
   python3 - "${HOME}/.claude.json" "$credential_service" <<'PY'
 import hashlib
@@ -241,25 +263,41 @@ except (OSError, json.JSONDecodeError, AttributeError):
     raise SystemExit(0)
 if not isinstance(oauth_account, dict):
     raise SystemExit(0)
-stable_keys = (
-    "accountUuid", "accountUUID", "accountId", "account_id",
-    "organizationUuid", "organizationUUID", "organizationId", "organization_id",
-)
-owner = {
-    key: str(oauth_account[key])
-    for key in stable_keys
-    if oauth_account.get(key) not in (None, "")
-}
-if not owner:
+account_keys = ("accountUuid", "accountUUID", "accountId", "account_id")
+organization_keys = ("organizationUuid", "organizationUUID", "organizationId", "organization_id")
+values = {}
+for key in account_keys:
+    if oauth_account.get(key) not in (None, ""):
+        values["account_id"] = str(oauth_account[key])
+        break
+for key in organization_keys:
+    if oauth_account.get(key) not in (None, ""):
+        values["organization_id"] = str(oauth_account[key])
+        break
+if not values:
     raise SystemExit(0)
+owner = {"account_id": values["account_id"]} if "account_id" in values else {"organization_id": values["organization_id"]}
 identity_source = json.dumps(
     {"credential_service": credential_service, "owner": owner},
     sort_keys=True,
     separators=(",", ":"),
     ensure_ascii=False,
 )
-print(hashlib.sha256(identity_source.encode("utf-8")).hexdigest())
+alias_hashes = sorted(
+    hashlib.sha256(f"{credential_service}:{kind}:{value}".encode("utf-8")).hexdigest()
+    for kind, value in values.items()
+)
+print(json.dumps({
+    "account_identity": hashlib.sha256(identity_source.encode("utf-8")).hexdigest(),
+    "account_alias_hashes": alias_hashes,
+}, separators=(",", ":")))
 PY
+}
+
+claude_account_identity() {
+  local evidence
+  evidence="$(claude_account_evidence)" || return 0
+  json_field_value "$evidence" "account_identity"
 }
 
 current_account_name_from_auth() {
@@ -384,7 +422,25 @@ def metadata_owner():
         "accountUuid", "accountUUID", "accountId", "account_id",
         "organizationUuid", "organizationUUID", "organizationId", "organization_id",
     )
-    return {key: str(account[key]) for key in keys if account.get(key) not in (None, "")}
+    return normalized_owner({key: str(account[key]) for key in keys if account.get(key) not in (None, "")})
+
+
+def normalized_owner(values):
+    account_keys = ("accountUuid", "accountUUID", "accountId", "account_id", "account_uuid", "sub")
+    organization_keys = (
+        "organizationUuid", "organizationUUID", "organizationId", "organization_id",
+        "organization_uuid", "org_id",
+    )
+    owner = {}
+    for key in account_keys:
+        if values.get(key) not in (None, ""):
+            owner["account_id"] = str(values[key])
+            break
+    for key in organization_keys:
+        if values.get(key) not in (None, ""):
+            owner["organization_id"] = str(values[key])
+            break
+    return owner
 
 
 def credential_owner(credentials):
@@ -407,7 +463,7 @@ def credential_owner(credentials):
                 visit(child)
 
     visit(credentials)
-    return {key: value for key, value in sorted(set(found))}
+    return normalized_owner({key: value for key, value in sorted(set(found))})
 
 
 def token_owner(token):
@@ -423,27 +479,38 @@ def token_owner(token):
         "sub", "account_uuid", "account_id", "organization_uuid",
         "organization_id", "org_id",
     )
-    return {key: str(claims[key]) for key in keys if claims.get(key) not in (None, "")}
+    return normalized_owner({key: str(claims[key]) for key in keys if claims.get(key) not in (None, "")})
 
 
 def owner_identity(credentials=None, access_token=None):
-    owner = credential_owner(credentials or {})
-    if not owner:
-        owner = token_owner(access_token)
-    if not owner:
-        owner = metadata_owner()
-    if not owner:
-        return None
+    credential = credential_owner(credentials or {})
+    token = token_owner(access_token)
+    metadata = metadata_owner()
+    trusted = tuple(source for source in (credential, token) if source)
+    if trusted:
+        trusted_pairs = {pair for source in trusted for pair in source.items()}
+        if not trusted_pairs.intersection(metadata.items()):
+            metadata = {}
+    sources = trusted + ((metadata,) if metadata else ())
+    primary = next((source for source in sources if source), {})
+    if not primary:
+        return None, []
+    owner = {"account_id": primary["account_id"]} if "account_id" in primary else {"organization_id": primary["organization_id"]}
     source = json.dumps(
         {"credential_service": credential_service, "owner": owner},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+    aliases = {
+        hashlib.sha256(f"{credential_service}:{kind}:{value}".encode("utf-8")).hexdigest()
+        for candidate in sources
+        for kind, value in candidate.items()
+    }
+    return hashlib.sha256(source.encode("utf-8")).hexdigest(), sorted(aliases)
 
 
-def emit(status, message, snapshot=None, account_identity=None):
+def emit(status, message, snapshot=None, account_identity=None, account_alias_hashes=None):
     print(
         json.dumps(
             {
@@ -451,6 +518,7 @@ def emit(status, message, snapshot=None, account_identity=None):
                 "message": message,
                 "snapshot": snapshot,
                 "account_identity": account_identity,
+                "account_alias_hashes": account_alias_hashes or [],
             },
             separators=(",", ":"),
         )
@@ -497,7 +565,7 @@ if not access_token:
         emit("missing_token", "Claude Code access token is missing. Sign in again.")
     )
 
-account_identity = owner_identity(credentials, access_token)
+account_identity, account_alias_hashes = owner_identity(credentials, access_token)
 
 request = urllib.request.Request(
     usage_url,
@@ -514,23 +582,23 @@ try:
 except urllib.error.HTTPError as exc:
     if exc.code in (401, 403):
         raise SystemExit(
-            emit("unauthorized", "Claude Code login expired. Sign in again.", account_identity=account_identity)
+            emit("unauthorized", "Claude Code login expired. Sign in again.", account_identity=account_identity, account_alias_hashes=account_alias_hashes)
         )
     raise SystemExit(
-        emit("network_error", f"Claude usage API returned HTTP {exc.code}.", account_identity=account_identity)
+        emit("network_error", f"Claude usage API returned HTTP {exc.code}.", account_identity=account_identity, account_alias_hashes=account_alias_hashes)
     )
 except urllib.error.URLError as exc:
-    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}", account_identity=account_identity))
+    raise SystemExit(emit("network_error", f"Claude usage API unavailable: {exc.reason}", account_identity=account_identity, account_alias_hashes=account_alias_hashes))
 except TimeoutError:
-    raise SystemExit(emit("network_error", "Claude usage API request timed out.", account_identity=account_identity))
+    raise SystemExit(emit("network_error", "Claude usage API request timed out.", account_identity=account_identity, account_alias_hashes=account_alias_hashes))
 except json.JSONDecodeError:
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity)
+        emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity, account_alias_hashes=account_alias_hashes)
     )
 
 if payload.get("error"):
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity)
+        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity, account_alias_hashes=account_alias_hashes)
     )
 
 five_hour = payload.get("five_hour") or {}
@@ -540,7 +608,7 @@ seven_day_util = seven_day.get("utilization")
 
 if five_hour_util is None and seven_day_util is None:
     raise SystemExit(
-        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity)
+        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity, account_alias_hashes=account_alias_hashes)
     )
 
 snapshot = {
@@ -558,7 +626,7 @@ snapshot = {
     "weekly_resets_at": seven_day.get("resets_at"),
 }
 
-raise SystemExit(emit("ok", "", snapshot, account_identity))
+raise SystemExit(emit("ok", "", snapshot, account_identity, account_alias_hashes))
 PY
 }
 
@@ -878,6 +946,58 @@ claude_usage_cache_path() {
   echo "${USAGE_CACHE_DIR}/claude/usage.json"
 }
 
+read_claude_usage_cache_snapshot_json() {
+  local cache_path="$1"
+  local current_aliases_json="$2"
+  [[ -f "$cache_path" ]] || return 1
+  if [[ "$current_aliases_json" == "[]" ]]; then
+    rm -f "$cache_path"
+    return 1
+  fi
+
+  if ! python3 - "$cache_path" "$current_aliases_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+current_aliases = set(json.loads(sys.argv[2]))
+stored_aliases = set(data.get("account_alias_hashes") or [])
+if not current_aliases.intersection(stored_aliases) or not isinstance(data.get("snapshot"), dict):
+    raise SystemExit(1)
+print(json.dumps(data, separators=(",", ":")))
+PY
+  then
+    rm -f "$cache_path"
+    return 1
+  fi
+}
+
+write_claude_usage_cache_snapshot() {
+  local cache_path="$1"
+  local account_identity="$2"
+  local account_aliases_json="$3"
+  local snapshot_json="$4"
+  [[ -n "$account_identity" && "$account_aliases_json" != "[]" ]] || return 1
+
+  local envelope_json
+  envelope_json="$(python3 - "$account_identity" "$account_aliases_json" "$snapshot_json" <<'PY'
+import json
+import sys
+
+print(json.dumps(
+    {
+        "account_identity": sys.argv[1],
+        "account_alias_hashes": sorted(set(json.loads(sys.argv[2]))),
+        "snapshot": json.loads(sys.argv[3]),
+    },
+    separators=(",", ":"),
+))
+PY
+)"
+  write_usage_cache_snapshot "$cache_path" "$envelope_json"
+}
+
 write_usage_cache_snapshot() {
   local cache_path="$1"
   local snapshot_json="$2"
@@ -906,6 +1026,19 @@ value = data.get(sys.argv[2], "")
 if value is None:
     value = ""
 print(value)
+PY
+}
+
+json_field_json_value() {
+  local json_value="$1"
+  local field_name="$2"
+
+  python3 - "$json_value" "$field_name" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print(json.dumps(data.get(sys.argv[2]), separators=(",", ":")))
 PY
 }
 
@@ -1067,12 +1200,20 @@ collect_codex_widget_lines() {
 collect_claude_widget_line() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local mode="${2:-live}"
-  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity
+  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity account_aliases_json evidence_json cache_envelope
 
   cache_path="$(claude_usage_cache_path)"
-  account_identity="$(claude_account_identity)"
+  evidence_json="$(claude_account_evidence)"
+  account_identity=""
+  account_aliases_json="[]"
+  if [[ -n "$evidence_json" ]]; then
+    account_identity="$(json_field_value "$evidence_json" "account_identity")"
+    account_aliases_json="$(json_field_json_value "$evidence_json" "account_alias_hashes")"
+  fi
   if [[ "$mode" == "cached" ]]; then
-    if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
+    if cache_envelope="$(read_claude_usage_cache_snapshot_json "$cache_path" "$account_aliases_json" 2>/dev/null)"; then
+      cached_snapshot_json="$(json_field_json_value "$cache_envelope" "snapshot")"
+      account_identity="$(json_field_value "$cache_envelope" "account_identity")"
       append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$cached_snapshot_json" "$account_identity"
     else
       append_widget_state_line \
@@ -1090,19 +1231,25 @@ collect_claude_widget_line() {
 
   if result_json="$(fetch_claude_status_json "$timeout_seconds" 2>/dev/null)"; then
     account_identity="$(json_field_value "$result_json" "account_identity")"
+    account_aliases_json="$(json_field_json_value "$result_json" "account_alias_hashes")"
     snapshot_json="$(json_snapshot_value "$result_json")" || return 0
-    write_usage_cache_snapshot "$(claude_usage_cache_path)" "$snapshot_json"
+    if ! write_claude_usage_cache_snapshot "$cache_path" "$account_identity" "$account_aliases_json" "$snapshot_json"; then
+      rm -f "$cache_path"
+    fi
     append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$snapshot_json" "$account_identity"
     return 0
   fi
 
   account_identity="$(json_field_value "$result_json" "account_identity")"
+  account_aliases_json="$(json_field_json_value "$result_json" "account_alias_hashes")"
   status="$(json_field_value "$result_json" "status")"
   message="$(json_field_value "$result_json" "message")"
   [[ -n "${status:-}" ]] || status="network_error"
   [[ -n "${message:-}" ]] || message="Claude usage could not be fetched."
 
-  if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
+  if cache_envelope="$(read_claude_usage_cache_snapshot_json "$cache_path" "$account_aliases_json" 2>/dev/null)"; then
+    cached_snapshot_json="$(json_field_json_value "$cache_envelope" "snapshot")"
+    account_identity="$(json_field_value "$cache_envelope" "account_identity")"
     append_widget_state_line "claude" "claude" "0" "$status" "$message" "1" "$cached_snapshot_json" "$account_identity"
   else
     append_widget_state_line "claude" "claude" "0" "$status" "$message" "0" "" "$account_identity"
@@ -1173,6 +1320,7 @@ build_widget_snapshot_json() {
   load_config
   if [[ "$mode" == "live" ]]; then
     snapshot_dir="$(mktemp -d)"
+    WIDGET_SNAPSHOT_DIR="$snapshot_dir"
     acquire_auth_store_lock
     load_state
     active_current="$(resolved_current_account_name)"
@@ -1188,6 +1336,7 @@ build_widget_snapshot_json() {
     active_current="$(resolved_current_account_name)"
   fi
   tmp="$(mktemp)"
+  WIDGET_LINES_FILE="$tmp"
 
   {
     collect_codex_widget_lines "$timeout_seconds" "$active_current" "$mode" "$auth_source_dir" "$reconcile_saved_auth"
@@ -1231,10 +1380,7 @@ PY
   else
     status=$?
   fi
-  rm -f "$tmp"
-  if [[ -n "$snapshot_dir" ]]; then
-    rm -rf "$snapshot_dir"
-  fi
+  cleanup_widget_work_files
   return "$status"
 }
 
@@ -2385,8 +2531,13 @@ EOF
 
   [[ "$timeout_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout must be numeric"
 
-  local widget_json
-  widget_json="$(build_widget_snapshot_json "$timeout_seconds" "$mode")"
+  local widget_json widget_payload_file
+  widget_payload_file="$(mktemp)"
+  WIDGET_PAYLOAD_FILE="$widget_payload_file"
+  build_widget_snapshot_json "$timeout_seconds" "$mode" > "$widget_payload_file"
+  widget_json="$(<"$widget_payload_file")"
+  rm -f "$widget_payload_file"
+  WIDGET_PAYLOAD_FILE=""
 
   if [[ "$refresh_cache_only" == "1" ]]; then
     return 0

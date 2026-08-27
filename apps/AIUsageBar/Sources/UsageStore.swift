@@ -128,6 +128,12 @@ final class UsageStore: ObservableObject {
         refreshCostHistory(force: true)
     }
 
+    func accountMutationCompleted() {
+        liveGeneration += 1
+        liveRefreshInFlight = false
+        isRefreshing = false
+    }
+
     func refreshCostHistory(force: Bool = false) {
         if !force, let costHistory, Date().timeIntervalSince(costHistory.generatedAt) < 900 {
             return
@@ -182,14 +188,14 @@ final class UsageStore: ObservableObject {
     }
 
     func isTopBarVisible(_ account: UsageAccount) -> Bool {
-        canShowInTopBar(account) && !hiddenTopBarAccountIDs.contains(account.id)
+        canShowInTopBar(account) && !hiddenTopBarAccountIDs.contains(account.preferenceID)
     }
 
     func setTopBarVisible(_ account: UsageAccount, visible: Bool) {
         if visible {
-            hiddenTopBarAccountIDs.remove(account.id)
+            hiddenTopBarAccountIDs.remove(account.preferenceID)
         } else {
-            hiddenTopBarAccountIDs.insert(account.id)
+            hiddenTopBarAccountIDs.insert(account.preferenceID)
         }
         TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
         updateStatusSummary()
@@ -206,11 +212,25 @@ final class UsageStore: ObservableObject {
     }
 
     private func apply(payload: UsagePayload) {
+        migrateLegacyTopBarPreferences(accounts: payload.accounts)
         self.payload = payload
         self.errorMessage = nil
         history.record(accounts: payload.accounts)
         history.save()
         updateStatusSummary()
+    }
+
+    private func migrateLegacyTopBarPreferences(accounts: [UsageAccount]) {
+        var changed = false
+        for account in accounts where account.preferenceID != account.id {
+            if hiddenTopBarAccountIDs.remove(account.id) != nil {
+                hiddenTopBarAccountIDs.insert(account.preferenceID)
+                changed = true
+            }
+        }
+        if changed {
+            TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
+        }
     }
 
     private func updateStatusSummary() {

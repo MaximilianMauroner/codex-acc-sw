@@ -56,6 +56,19 @@ identity_three="$(claude_identity)"
 [[ "$identity_one" == "$identity_two" ]] || fail "mutable Claude metadata changed the identity"
 [[ "$identity_one" != "$identity_three" ]] || fail "a different Claude owner reused the identity"
 
+claude_cache="$TEST_HOME/.codex/switch/usage-cache/claude/usage.json"
+metadata_alias="$(printf 'Claude Code-credentials:account_id:%s' account-2 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+stored_identity="$(printf 'stored-live-owner' | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+cat >"$claude_cache" <<EOF
+{"account_identity":"$stored_identity","account_alias_hashes":["$metadata_alias"],"snapshot":{"last_seen_at":"2026-08-27T00:00:00Z","current_remaining_percent":50}}
+EOF
+cached_identity="$(claude_identity)"
+[[ "$cached_identity" == "$stored_identity" ]] || fail "cached Claude row did not retain its authoritative live identity"
+
+write_claude_metadata account-3 "Another owner"
+claude_identity >/dev/null
+[[ ! -f "$claude_cache" ]] || fail "Claude cache survived an owner mismatch"
+
 FAKE_BIN="$TEST_HOME/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/security" <<EOF
@@ -68,13 +81,45 @@ chmod 755 "$FAKE_BIN/security"
 
 HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" bash "$COMMAND" widget --format json >"$TEST_HOME/live.out" 2>&1 &
 widget_pid=$!
-for _ in {1..100}; do
+deadline=$((SECONDS + 5))
+while (( SECONDS < deadline )); do
   [[ -f "$TEST_HOME/security-started" ]] && break
+  if ! kill -0 "$widget_pid" 2>/dev/null; then
+    wait "$widget_pid" || true
+    fail "live widget exited before the Keychain fixture started"
+  fi
   sleep 0.01
 done
 [[ -f "$TEST_HOME/security-started" ]] || fail "fake Keychain reader did not start"
 [[ ! -d "$TEST_HOME/.codex/switch/auth-store.lock" ]] || \
   fail "live widget held the auth-store lock during Keychain work"
 wait "$widget_pid"
+
+TEMP_ROOT="$TEST_HOME/widget-tmp"
+mkdir -p "$TEMP_ROOT"
+cat >"$FAKE_BIN/security" <<EOF
+#!/usr/bin/env bash
+touch "$TEST_HOME/security-started-term"
+sleep 1
+exit 1
+EOF
+chmod 755 "$FAKE_BIN/security"
+HOME="$TEST_HOME" TMPDIR="$TEMP_ROOT" PATH="$FAKE_BIN:$PATH" bash "$COMMAND" widget --format json >"$TEST_HOME/term.out" 2>&1 &
+widget_pid=$!
+deadline=$((SECONDS + 5))
+while (( SECONDS < deadline )); do
+  [[ -f "$TEST_HOME/security-started-term" ]] && break
+  if ! kill -0 "$widget_pid" 2>/dev/null; then
+    wait "$widget_pid" || true
+    fail "cleanup fixture exited before Keychain work"
+  fi
+  sleep 0.01
+done
+[[ -f "$TEST_HOME/security-started-term" ]] || fail "cleanup fixture did not reach Keychain work"
+kill -TERM "$widget_pid"
+wait "$widget_pid" || true
+if find "$TEMP_ROOT" -mindepth 1 -print -quit | grep -q .; then
+  fail "widget temporary files survived TERM"
+fi
 
 echo "shell regressions passed"

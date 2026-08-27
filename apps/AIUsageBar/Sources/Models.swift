@@ -31,6 +31,11 @@ struct UsageAccount: Decodable, Identifiable {
         return "\(provider):\(accountIdentity)"
     }
 
+    var preferenceID: String {
+        guard let accountIdentity, !accountIdentity.isEmpty else { return id }
+        return "\(provider):owner:\(accountIdentity)"
+    }
+
     var isClaude: Bool {
         provider == "claude"
     }

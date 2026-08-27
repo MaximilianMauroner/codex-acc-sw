@@ -568,6 +568,7 @@ private struct ActionsScreen: View {
                 isRunning = false
                 if result.succeeded {
                     onSuccess?()
+                    store.accountMutationCompleted()
                     store.refreshNow()
                 }
             }
