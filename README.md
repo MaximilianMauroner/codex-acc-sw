@@ -82,7 +82,7 @@ make open-macos-menu-app
 
 The native app runs as a menu-bar-only app. Its compact title shows each working plan's limiting budget, period, and reset shorthand, for example `chris wk26% 4d` or `claude 5h78% 4h`. Its SwiftUI popover shows active Codex and Claude summaries, per-account progress bars, reset times, projected pace, local usage sparklines, and a 30-day stacked cost chart with per-day hover breakdowns.
 
-Use the Settings screen to choose which working plans appear in the closed menu-bar title. Hidden plans remain visible inside the popover.
+Use the Settings screen to choose which working plans appear in the closed menu-bar title. Hidden plans remain visible inside the popover. A paid row without a stable account identity is always shown until the CLI can derive an ownership-safe preference key; Settings labels that exception instead of offering a toggle it cannot save.
 
 Use the Actions screen to switch Codex accounts, save the current login, prepare a new login, rename saved accounts, or remove inactive saved accounts. Claude auth is currently shown as storage information only; profile switching is not automated yet.
 

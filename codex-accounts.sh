@@ -252,13 +252,13 @@ if not os.path.isfile(path):
     raise SystemExit(0)
 try:
     with open(path, "r", encoding="utf-8") as handle:
-        tokens = (json.load(handle).get("tokens") or {})
-except (OSError, json.JSONDecodeError, AttributeError):
+        auth = json.load(handle)
+except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
-
-account_id = str(tokens.get("account_id") or "").strip()
-if account_id:
-    print(hashlib.sha256(account_id.encode("utf-8")).hexdigest())
+if not isinstance(auth, dict):
+    raise SystemExit(0)
+tokens = auth.get("tokens") or {}
+if not isinstance(tokens, dict):
     raise SystemExit(0)
 
 account_claim_keys = (
@@ -268,6 +268,9 @@ account_claim_keys = (
 )
 account_claims = set()
 subject_claims = set()
+top_level_account_id = str(tokens.get("account_id") or "").strip()
+if top_level_account_id:
+    account_claims.add(top_level_account_id)
 for token_name in ("id_token", "access_token"):
     token = str(tokens.get(token_name) or "")
     if token.count(".") < 2:
@@ -278,6 +281,8 @@ for token_name in ("id_token", "access_token"):
         claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
         continue
+    if not isinstance(claims, dict):
+        continue
     for key in account_claim_keys:
         value = str(claims.get(key) or "").strip()
         if value:
@@ -286,13 +291,15 @@ for token_name in ("id_token", "access_token"):
     if subject:
         subject_claims.add(subject)
 
-if len(account_claims) == 1:
-    value = next(iter(account_claims))
-    print(hashlib.sha256(value.encode("utf-8")).hexdigest())
-elif not account_claims and len(subject_claims) == 1:
+if len(account_claims) > 1 or len(subject_claims) > 1:
+    raise SystemExit(0)
+if len(subject_claims) == 1:
     value = next(iter(subject_claims))
     source = f"claim:sub:{value}"
     print(hashlib.sha256(source.encode("utf-8")).hexdigest())
+elif len(account_claims) == 1:
+    value = next(iter(account_claims))
+    print(hashlib.sha256(value.encode("utf-8")).hexdigest())
 PY
 }
 
@@ -528,6 +535,8 @@ def token_owner(token):
         payload += "=" * (-len(payload) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return {}
+    if not isinstance(claims, dict):
         return {}
     keys = (
         "sub", "account_uuid", "account_id", "organization_uuid",
@@ -1287,7 +1296,7 @@ collect_codex_widget_lines() {
 collect_claude_widget_line() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local mode="${2:-live}"
-  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity account_aliases_json organization_aliases_json evidence_json cache_envelope
+  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity account_aliases_json organization_aliases_json evidence_json cache_envelope metadata_account_aliases_json metadata_organization_aliases_json failure_account_aliases_json failure_organization_aliases_json
 
   cache_path="$(claude_usage_cache_path)"
   evidence_json="$(claude_account_evidence)"
@@ -1299,6 +1308,8 @@ collect_claude_widget_line() {
     account_aliases_json="$(json_field_json_value "$evidence_json" "account_alias_hashes")"
     organization_aliases_json="$(json_field_json_value "$evidence_json" "organization_alias_hashes")"
   fi
+  metadata_account_aliases_json="$account_aliases_json"
+  metadata_organization_aliases_json="$organization_aliases_json"
   if [[ "$mode" == "cached" ]]; then
     if cache_envelope="$(read_claude_usage_cache_snapshot_json "$cache_path" "$account_aliases_json" "$organization_aliases_json" 2>/dev/null)"; then
       cached_snapshot_json="$(json_field_json_value "$cache_envelope" "snapshot")"
@@ -1331,8 +1342,15 @@ collect_claude_widget_line() {
   fi
 
   account_identity="$(json_field_value "$result_json" "account_identity")"
-  account_aliases_json="$(json_field_json_value "$result_json" "account_alias_hashes")"
-  organization_aliases_json="$(json_field_json_value "$result_json" "organization_alias_hashes")"
+  failure_account_aliases_json="$(json_field_json_value "$result_json" "account_alias_hashes")"
+  failure_organization_aliases_json="$(json_field_json_value "$result_json" "organization_alias_hashes")"
+  if [[ "$failure_account_aliases_json" == "[]" && "$failure_organization_aliases_json" == "[]" ]]; then
+    account_aliases_json="$metadata_account_aliases_json"
+    organization_aliases_json="$metadata_organization_aliases_json"
+  else
+    account_aliases_json="$failure_account_aliases_json"
+    organization_aliases_json="$failure_organization_aliases_json"
+  fi
   status="$(json_field_value "$result_json" "status")"
   message="$(json_field_value "$result_json" "message")"
   [[ -n "${status:-}" ]] || status="network_error"

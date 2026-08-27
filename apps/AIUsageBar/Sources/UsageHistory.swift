@@ -5,12 +5,28 @@ struct HistorySample: Codable, Identifiable {
     let timestamp: Date
     let currentRemaining: Double?
     let weeklyRemaining: Double?
+    let currentResetDate: Date?
+    let weeklyResetDate: Date?
+    let currentWindowMinutes: Double?
+    let weeklyWindowMinutes: Double?
 
-    init(timestamp: Date, currentRemaining: Double?, weeklyRemaining: Double?) {
+    init(
+        timestamp: Date,
+        currentRemaining: Double?,
+        weeklyRemaining: Double?,
+        currentResetDate: Date? = nil,
+        weeklyResetDate: Date? = nil,
+        currentWindowMinutes: Double? = nil,
+        weeklyWindowMinutes: Double? = nil
+    ) {
         self.id = UUID()
         self.timestamp = timestamp
         self.currentRemaining = currentRemaining
         self.weeklyRemaining = weeklyRemaining
+        self.currentResetDate = currentResetDate
+        self.weeklyResetDate = weeklyResetDate
+        self.currentWindowMinutes = currentWindowMinutes
+        self.weeklyWindowMinutes = weeklyWindowMinutes
     }
 }
 
@@ -35,7 +51,11 @@ struct UsageHistory: Codable {
             let sample = HistorySample(
                 timestamp: timestamp,
                 currentRemaining: snapshot.currentRemainingPercent,
-                weeklyRemaining: snapshot.weeklyRemainingPercent
+                weeklyRemaining: snapshot.weeklyRemainingPercent,
+                currentResetDate: snapshot.currentResetDate,
+                weeklyResetDate: snapshot.weeklyResetDate,
+                currentWindowMinutes: BudgetPeriod.current.windowMinutes(in: snapshot),
+                weeklyWindowMinutes: BudgetPeriod.weekly.windowMinutes(in: snapshot)
             )
             var samples = samplesByAccount[historyID] ?? []
             if let last = samples.last, abs(last.timestamp.timeIntervalSince(timestamp)) < 30 {

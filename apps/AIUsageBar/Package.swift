@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "AIUsageBar",
             path: "Sources"
+        ),
+        .testTarget(
+            name: "AIUsageBarTests",
+            dependencies: ["AIUsageBar"],
+            path: "Tests"
         )
     ],
     swiftLanguageVersions: [.v5]

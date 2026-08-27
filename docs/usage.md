@@ -127,7 +127,7 @@ The menu-bar title stays compact, for example `CX chris wk26% 4d main wk84% 6d |
 
 The app refreshes cached data immediately, then fetches live data in the background. It also refreshes roughly once per minute while running.
 
-Use the Settings screen to choose which working plans appear in the closed menu-bar title. Hidden plans remain visible inside the popover; if every item is hidden, the title falls back to `AI`.
+Use the Settings screen to choose which working plans appear in the closed menu-bar title. Hidden plans remain visible inside the popover; if every item is hidden, the title falls back to `AI`. A paid row without a stable account identity remains in the title as `Always shown`, because the app cannot store an ownership-safe visibility preference for it yet.
 
 Use the Actions screen to switch Codex accounts, save the current login, prepare a new login, rename saved accounts, or remove inactive saved accounts. The new-login flow can open Terminal for `codex login` and then saves the account under the prepared name.
 

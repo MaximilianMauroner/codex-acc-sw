@@ -32,7 +32,12 @@ enum PaceCalculator {
 
         let baseDate = snapshot.lastSeenDate ?? Date()
         let secondsToReset = max(0, resetDate.timeIntervalSince(baseDate))
-        let burnPerSecond = recentBurnRate(for: period, history: history)
+        let burnPerSecond = recentBurnRate(
+            for: period,
+            snapshot: snapshot,
+            history: history,
+            baseDate: baseDate
+        )
             ?? windowBurnRate(snapshot: snapshot, period: period, secondsToReset: secondsToReset)
 
         guard let burnPerSecond else {
@@ -74,12 +79,34 @@ enum PaceCalculator {
             .max { $0.severity < $1.severity } ?? .learning
     }
 
-    private static func recentBurnRate(for period: BudgetPeriod, history: [HistorySample]) -> Double? {
+    private static func recentBurnRate(
+        for period: BudgetPeriod,
+        snapshot: UsageSnapshot,
+        history: [HistorySample],
+        baseDate: Date
+    ) -> Double? {
         let horizon: TimeInterval = period == .current ? 60 * 60 : 6 * 60 * 60
         let minimumSpan: TimeInterval = period == .current ? 5 * 60 : 20 * 60
-        let cutoff = Date().addingTimeInterval(-horizon)
+        let cutoff = baseDate.addingTimeInterval(-horizon)
+        let windowReset = period.resetDate(in: snapshot)
+        let windowMinutes = period.windowMinutes(in: snapshot)
+        let hasStoredWindowIdentity = history.contains { sample in
+            sample.resetDate(for: period) != nil || sample.windowMinutes(for: period) != nil
+        }
         var recent = history
             .filter { $0.timestamp >= cutoff }
+            .filter { sample in
+                guard hasStoredWindowIdentity else { return true }
+                guard
+                    let windowReset,
+                    let sampleReset = sample.resetDate(for: period),
+                    abs(sampleReset.timeIntervalSince(windowReset)) < 1,
+                    let sampleWindowMinutes = sample.windowMinutes(for: period)
+                else {
+                    return false
+                }
+                return abs(sampleWindowMinutes - windowMinutes) < 0.01
+            }
             .compactMap { sample -> (Date, Double)? in
                 let value: Double?
                 switch period {
@@ -91,9 +118,9 @@ enum PaceCalculator {
             }
             .sorted { $0.0 < $1.0 }
 
-        // A quota reset or upgrade starts a new observation series. Samples from
-        // the prior allowance cannot describe the current window's burn rate.
-        if recent.count > 1 {
+        // Older history files have no reset timestamp or window length. Keep
+        // their percentage-jump fallback until new boundary-aware samples exist.
+        if !hasStoredWindowIdentity && recent.count > 1 {
             var resetIndex: Int?
             for index in 1..<recent.count where recent[index].1 > recent[index - 1].1 + 0.5 {
                 resetIndex = index
@@ -127,5 +154,21 @@ enum PaceCalculator {
         let used = max(0, 100 - remaining)
         guard used > 0.5 else { return nil }
         return used / elapsed
+    }
+}
+
+private extension HistorySample {
+    func resetDate(for period: BudgetPeriod) -> Date? {
+        switch period {
+        case .current: return currentResetDate
+        case .weekly: return weeklyResetDate
+        }
+    }
+
+    func windowMinutes(for period: BudgetPeriod) -> Double? {
+        switch period {
+        case .current: return currentWindowMinutes
+        case .weekly: return weeklyWindowMinutes
+        }
     }
 }

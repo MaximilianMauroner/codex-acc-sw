@@ -74,9 +74,53 @@ import json, sys
 items = json.load(sys.stdin)["accounts"]
 print(next(item["account_identity"] for item in items if item["name"] == "legacy"))
 ')"
+[[ "$explicit_claim_identity" == "$legacy_identity" ]] || \
+  fail "a stronger account claim changed an existing subject-derived identity"
+
+read -r account_alias_token url_alias_token <<EOF
+$(python3 - <<'PY'
+import base64
+import json
+
+def part(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+header = part({"alg": "none"})
+print(
+    f"{header}.{part({'chatgpt_account_id': 'explicit-owner-1'})}.x "
+    f"{header}.{part({'https://api.openai.com/auth/chatgpt_account_id': 'explicit-owner-1'})}.x"
+)
+PY
+)
+EOF
+cat >"$TEST_HOME/.codex/accounts/explicit.auth.json" <<EOF
+{"tokens":{"id_token":"$account_alias_token","access_token":"$url_alias_token"}}
+EOF
+normalized_alias_identity="$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["accounts"]
+print(next(item["account_identity"] for item in items if item["name"] == "explicit"))
+')"
 expected_explicit_identity="$(printf explicit-owner-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
-[[ "$explicit_claim_identity" == "$expected_explicit_identity" ]] || \
-  fail "explicit account claim did not take precedence over a subject claim from another token"
+[[ "$normalized_alias_identity" == "$expected_explicit_identity" ]] || \
+  fail "equivalent explicit account claim aliases produced different ownership evidence"
+
+assert_malformed_auth_is_identityless() {
+  local auth_json="$1"
+  printf '%s\n' "$auth_json" >"$TEST_HOME/.codex/accounts/malformed.auth.json"
+  local identity
+  identity="$(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
+import json, sys
+items = json.load(sys.stdin)["accounts"]
+print(next(item["account_identity"] for item in items if item["name"] == "malformed"))
+')" || fail "malformed auth aborted widget collection"
+  [[ "$identity" == "None" ]] || fail "malformed auth produced an ownership identity"
+}
+
+assert_malformed_auth_is_identityless '[]'
+assert_malformed_auth_is_identityless '{"tokens":[]}'
+assert_malformed_auth_is_identityless '{"tokens":{"id_token":"e30.W10.x"}}'
+rm -f "$TEST_HOME/.codex/accounts/malformed.auth.json"
 
 cp "$TEST_HOME/.codex/accounts/legacy.auth.json" "$TEST_HOME/.codex/auth.json"
 cache_key="$(printf legacy | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
@@ -129,6 +173,27 @@ EOF
 cached_identity="$(claude_identity)"
 [[ "$cached_identity" == "$stored_identity" ]] || fail "cached Claude row did not retain its authoritative live identity"
 
+FAKE_BIN="$TEST_HOME/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/security" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod 755 "$FAKE_BIN/security"
+HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" bash "$COMMAND" widget --format json >"$TEST_HOME/claude-failure.json"
+python3 - "$TEST_HOME/claude-failure.json" <<'PY' || fail "Claude credential failure discarded matching metadata cache evidence"
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    items = json.load(handle)["accounts"]
+claude = next(item for item in items if item["provider"] == "claude")
+assert claude["stale"] is True
+assert claude["status"] == "missing_credentials"
+assert claude["snapshot"]["current_remaining_percent"] == 50
+PY
+[[ -f "$claude_cache" ]] || fail "Claude credential failure deleted a valid owner-bound cache"
+
 write_claude_metadata account-3 "Another owner"
 claude_identity >/dev/null
 [[ ! -f "$claude_cache" ]] || fail "Claude cache survived an owner mismatch"
@@ -140,7 +205,6 @@ EOF
 claude_identity >/dev/null
 [[ ! -f "$claude_cache" ]] || fail "organization-only Claude cache envelope survived validation"
 
-FAKE_BIN="$TEST_HOME/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/security" <<EOF
 #!/usr/bin/env bash
@@ -203,6 +267,34 @@ swiftbar_title="${swiftbar_output%%$'\n'*}"
 [[ "$swiftbar_title" == "AI usage"* ]] || fail "SwiftBar title fell back to an inactive Codex account"
 if grep -Eq '^Claude( |$)' <<<"$swiftbar_output"; then
   fail "SwiftBar rendered a Claude section without a Claude row"
+fi
+
+export CODEX_ACCOUNT_SWITCH_BIN=/bin/true
+# shellcheck source=../plugins/swiftbar/ai-usage.1m.sh
+original_home="$HOME"
+HOME="$TEST_HOME"
+source "$ROOT/plugins/swiftbar/ai-usage.1m.sh"
+HOME="$original_home"
+refresh_lock="$RUNTIME_DIR/refresh.lock"
+acquire_refresh_lock "$refresh_lock" || fail "SwiftBar lock fixture could not acquire a fresh lock"
+[[ -f "$refresh_lock" && ! -d "$refresh_lock" ]] || fail "SwiftBar lock was not published as a complete file"
+[[ "$(sed -n '1p' "$refresh_lock")" =~ ^[0-9]+$ ]] || fail "SwiftBar lock omitted its owner PID"
+if (acquire_refresh_lock "$refresh_lock"); then
+  fail "SwiftBar lock admitted a contender while its owner was alive"
+fi
+release_refresh_lock "$refresh_lock" "$REFRESH_LOCK_OWNER_FILE"
+[[ ! -e "$refresh_lock" ]] || fail "SwiftBar lock release left the lock published"
+
+mkdir "$refresh_lock"
+printf '%s\n' 99999999 >"$refresh_lock/pid"
+acquire_refresh_lock "$refresh_lock" || fail "SwiftBar lock did not migrate a stale legacy directory"
+[[ -f "$refresh_lock" && ! -d "$refresh_lock" ]] || fail "SwiftBar legacy lock was not migrated to a lock file"
+release_refresh_lock "$refresh_lock" "$REFRESH_LOCK_OWNER_FILE"
+
+mkdir "$refresh_lock"
+printf '%s\n' "$$" >"$refresh_lock/pid"
+if acquire_refresh_lock "$refresh_lock"; then
+  fail "SwiftBar lock reclaimed a live legacy directory owner"
 fi
 
 echo "shell regressions passed"

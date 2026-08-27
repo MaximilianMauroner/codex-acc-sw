@@ -204,7 +204,7 @@ private struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Menu bar")
                         .font(.system(size: 16, weight: .semibold))
-                    Text("Pick the paid usage rows shown in the closed title. Cached values stay available during refresh errors.")
+                    Text("Pick the paid usage rows shown in the closed title. Rows without a stable account identity stay visible but cannot save a visibility preference.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -274,13 +274,21 @@ private struct TopBarToggleRow: View {
             }
             Spacer(minLength: 0)
             TopBarStatusPill(text: statusText, tint: statusTint)
-            Toggle("", isOn: Binding(
-                get: { store.isTopBarVisible(account) },
-                set: { store.setTopBarVisible(account, visible: $0) }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .disabled(!canConfigure)
+            if canConfigure {
+                Toggle("", isOn: Binding(
+                    get: { store.isTopBarVisible(account) },
+                    set: { store.setTopBarVisible(account, visible: $0) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            } else {
+                Text(canShow ? "Always shown" : "Not shown")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .help(canShow
+                        ? "A stable account identity is needed before this row can save a visibility preference."
+                        : "This row has no paid usage budget to show in the menu bar.")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
