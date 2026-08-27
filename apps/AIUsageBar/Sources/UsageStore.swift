@@ -16,6 +16,7 @@ final class UsageStore: ObservableObject {
     private var liveRefreshInFlight = false
     private var costRefreshInFlight = false
     private var liveGeneration = 0
+    private var completedLiveGeneration = 0
 
     var codexAccounts: [UsageAccount] {
         payload?.accounts.filter { $0.isCodex } ?? []
@@ -52,48 +53,78 @@ final class UsageStore: ObservableObject {
     }
 
     func refresh(cached: Bool) {
-        let cachedIsEligible = cached && !liveRefreshInFlight
-        let capturedLiveGeneration = liveGeneration
-
-        if !cached {
+        if cached {
             guard !liveRefreshInFlight else { return }
-            liveGeneration += 1
-            liveRefreshInFlight = true
-            DispatchQueue.main.async {
-                self.isRefreshing = true
-            }
+            performCachedRefresh(generation: liveGeneration, pairedWithLive: false)
+        } else if let generation = beginLiveRefresh() {
+            performLiveRefresh(generation: generation)
         }
+    }
 
-        DispatchQueue.global(qos: cached ? .utility : .userInitiated).async {
+    func refreshCachedAndLive() {
+        guard !liveRefreshInFlight else { return }
+        liveGeneration += 1
+        let generation = liveGeneration
+        performCachedRefresh(generation: generation, pairedWithLive: true)
+        liveRefreshInFlight = true
+        isRefreshing = true
+        performLiveRefresh(generation: generation)
+    }
+
+    private func beginLiveRefresh() -> Int? {
+        guard !liveRefreshInFlight else { return nil }
+        liveGeneration += 1
+        liveRefreshInFlight = true
+        isRefreshing = true
+        return liveGeneration
+    }
+
+    private func performCachedRefresh(generation: Int, pairedWithLive: Bool) {
+        DispatchQueue.global(qos: .utility).async {
             do {
-                let payload = try self.runner.fetch(cached: cached)
+                let payload = try self.runner.fetch(cached: true)
                 DispatchQueue.main.async {
-                    if !cached {
+                    let sameGeneration = generation == self.liveGeneration
+                    let liveHasNotFinished = self.completedLiveGeneration < generation
+                    let eligible = pairedWithLive
+                        ? sameGeneration && liveHasNotFinished
+                        : sameGeneration && !self.liveRefreshInFlight
+                    if eligible {
                         self.apply(payload: payload)
-                    } else if cachedIsEligible && capturedLiveGeneration == self.liveGeneration {
-                        self.apply(payload: payload)
-                    }
-                    if !cached {
-                        self.isRefreshing = false
-                        self.liveRefreshInFlight = false
                     }
                 }
             } catch {
+                // Cached data is opportunistic; the paired live request owns errors.
+            }
+        }
+    }
+
+    private func performLiveRefresh(generation: Int) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let payload = try self.runner.fetch(cached: false)
                 DispatchQueue.main.async {
+                    guard generation == self.liveGeneration else { return }
+                    self.completedLiveGeneration = generation
+                    self.apply(payload: payload)
+                    self.isRefreshing = false
+                    self.liveRefreshInFlight = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard generation == self.liveGeneration else { return }
+                    self.completedLiveGeneration = generation
                     self.errorMessage = error.localizedDescription
                     self.updateStatusSummary()
-                    if !cached {
-                        self.isRefreshing = false
-                        self.liveRefreshInFlight = false
-                    }
+                    self.isRefreshing = false
+                    self.liveRefreshInFlight = false
                 }
             }
         }
     }
 
     func refreshNow() {
-        refresh(cached: true)
-        refresh(cached: false)
+        refreshCachedAndLive()
         refreshCostHistory(force: true)
     }
 

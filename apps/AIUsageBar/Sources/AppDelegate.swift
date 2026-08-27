@@ -22,8 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        store.refresh(cached: true)
-        store.refresh(cached: false)
+        store.refreshCachedAndLive()
         store.refreshCostHistory()
 
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -75,8 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        store.refresh(cached: true)
-        store.refresh(cached: false)
+        store.refreshCachedAndLive()
         store.refreshCostHistory()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()

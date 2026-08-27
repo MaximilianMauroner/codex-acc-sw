@@ -8,7 +8,7 @@
 - OpenAI Codex CLI installed and working
 - At least one successful `codex login`
 - Optional for the native menu-bar app: Swift toolchain / Xcode command line tools
-- Optional for native app cost history: `context-bar` or `npx`
+- Optional for native app cost history: an installed `context-bar` executable
 - Optional for the script-only menu-bar widget: [SwiftBar](https://github.com/swiftbar/SwiftBar)
 
 Install Codex CLI if needed:

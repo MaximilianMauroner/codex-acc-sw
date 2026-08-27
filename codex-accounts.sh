@@ -128,15 +128,21 @@ current_account_name_from_auth() {
 
   local live_account_id
   live_account_id="$(account_id_for_auth_path "$AUTH_FILE")"
-  [[ -n "${live_account_id:-}" ]] || return 0
 
   shopt -s nullglob
   local f base saved_account_id
   for f in "$DATA_DIR"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
-    saved_account_id="$(account_id_for_auth_path "$f")"
-    if [[ -n "${saved_account_id:-}" && "$saved_account_id" == "$live_account_id" ]]; then
+    if [[ -n "${live_account_id:-}" ]]; then
+      saved_account_id="$(account_id_for_auth_path "$f")"
+      if [[ -n "${saved_account_id:-}" && "$saved_account_id" == "$live_account_id" ]]; then
+        echo "$base"
+        return 0
+      fi
+    elif cmp -s "$AUTH_FILE" "$f"; then
+      # Legacy auth files may lack account_id. Byte identity is still a
+      # positive ownership match and avoids asking twice during manual flows.
       echo "$base"
       return 0
     fi
@@ -735,6 +741,8 @@ import json
 import sys
 
 provider, name, is_active, status, message, stale, snapshot_raw, account_identity = sys.argv[1:]
+if not account_identity and provider == "claude":
+    account_identity = "default-keychain-profile"
 snapshot = None
 if snapshot_raw:
     try:
@@ -774,7 +782,6 @@ collect_codex_widget_lines() {
     is_active=0
 
     if [[ -n "${active_current:-}" && "$base" == "$active_current" ]]; then
-      auth_path="$AUTH_FILE"
       is_active=1
     fi
     account_identity="$(account_identity_for_auth_path "$auth_path")"
@@ -803,9 +810,6 @@ collect_codex_widget_lines() {
     if [[ "$status" == "ok" ]]; then
       snapshot_json="$(json_snapshot_value "$result_json")"
       write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
-      if [[ "$auth_path" == "$AUTH_FILE" ]]; then
-        sync_active_auth_to_saved_account "$base" >/dev/null 2>&1 || true
-      fi
       append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json" "$account_identity"
       continue
     fi
