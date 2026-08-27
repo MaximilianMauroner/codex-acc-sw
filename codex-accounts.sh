@@ -239,10 +239,61 @@ PY
 }
 
 account_identity_for_auth_path() {
-  local account_id
-  account_id="$(account_id_for_auth_path "$1")"
-  [[ -n "${account_id:-}" ]] || return 0
-  printf '%s' "$account_id" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+  python3 - "$1" <<'PY'
+import base64
+import binascii
+import hashlib
+import json
+import os
+import sys
+
+path = sys.argv[1]
+if not os.path.isfile(path):
+    raise SystemExit(0)
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        tokens = (json.load(handle).get("tokens") or {})
+except (OSError, json.JSONDecodeError, AttributeError):
+    raise SystemExit(0)
+
+account_id = str(tokens.get("account_id") or "").strip()
+if account_id:
+    print(hashlib.sha256(account_id.encode("utf-8")).hexdigest())
+    raise SystemExit(0)
+
+account_claim_keys = (
+    "account_id",
+    "chatgpt_account_id",
+    "https://api.openai.com/auth/chatgpt_account_id",
+)
+account_claims = set()
+subject_claims = set()
+for token_name in ("id_token", "access_token"):
+    token = str(tokens.get(token_name) or "")
+    if token.count(".") < 2:
+        continue
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        continue
+    for key in account_claim_keys:
+        value = str(claims.get(key) or "").strip()
+        if value:
+            account_claims.add(value)
+    subject = str(claims.get("sub") or "").strip()
+    if subject:
+        subject_claims.add(subject)
+
+if len(account_claims) == 1:
+    value = next(iter(account_claims))
+    print(hashlib.sha256(value.encode("utf-8")).hexdigest())
+elif not account_claims and len(subject_claims) == 1:
+    value = next(iter(subject_claims))
+    source = f"claim:sub:{value}"
+    print(hashlib.sha256(source.encode("utf-8")).hexdigest())
+PY
 }
 
 claude_account_evidence() {
@@ -276,19 +327,21 @@ for key in organization_keys:
         break
 if not values:
     raise SystemExit(0)
-owner = {"account_id": values["account_id"]} if "account_id" in values else {"organization_id": values["organization_id"]}
-identity_source = json.dumps(
-    {"credential_service": credential_service, "owner": owner},
-    sort_keys=True,
-    separators=(",", ":"),
-    ensure_ascii=False,
-)
+identity = None
+if "account_id" in values:
+    identity_source = json.dumps(
+        {"credential_service": credential_service, "owner": {"account_id": values["account_id"]}},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    identity = hashlib.sha256(identity_source.encode("utf-8")).hexdigest()
 def alias_hash(kind, value):
     return hashlib.sha256(f"{credential_service}:{kind}:{value}".encode("utf-8")).hexdigest()
 
 
 print(json.dumps({
-    "account_identity": hashlib.sha256(identity_source.encode("utf-8")).hexdigest(),
+    "account_identity": identity,
     "account_alias_hashes": [alias_hash("account_id", values["account_id"])] if "account_id" in values else [],
     "organization_alias_hashes": [alias_hash("organization_id", values["organization_id"])] if "organization_id" in values else [],
 }, separators=(",", ":")))
@@ -504,12 +557,13 @@ def owner_identity(credentials=None, access_token=None):
     organization_ids = {source["organization_id"] for source in sources if source.get("organization_id")}
     if len(account_ids) > 1 or len(organization_ids) > 1:
         return None, [], []
-    if account_ids:
-        owner = {"account_id": next(iter(account_ids))}
-    elif organization_ids:
-        owner = {"organization_id": next(iter(organization_ids))}
-    else:
-        return None, [], []
+    if not account_ids:
+        organization_aliases = sorted(
+            hashlib.sha256(f"{credential_service}:organization_id:{value}".encode("utf-8")).hexdigest()
+            for value in organization_ids
+        )
+        return None, [], organization_aliases
+    owner = {"account_id": next(iter(account_ids))}
     source = json.dumps(
         {"credential_service": credential_service, "owner": owner},
         sort_keys=True,
@@ -918,7 +972,7 @@ fetch_and_format_usage_for_auth_path() {
   status="$(json_field_value "$result_json" "status")"
   if [[ "$status" != "ok" ]]; then
     if format_cached_usage_snapshot "$name" "$is_active" "$max_name_len"; then
-      return 0
+      return 1
     fi
 
     local marker="  "
@@ -992,10 +1046,7 @@ current_accounts = set(json.loads(sys.argv[2]))
 current_organizations = set(json.loads(sys.argv[3]))
 stored_accounts = set(data.get("account_alias_hashes") or [])
 stored_organizations = set(data.get("organization_alias_hashes") or [])
-if current_accounts and stored_accounts:
-    owner_matches = bool(current_accounts.intersection(stored_accounts))
-else:
-    owner_matches = bool(current_organizations.intersection(stored_organizations))
+owner_matches = bool(current_accounts and stored_accounts and current_accounts.intersection(stored_accounts))
 if not owner_matches or not isinstance(data.get("snapshot"), dict):
     raise SystemExit(1)
 print(json.dumps(data, separators=(",", ":")))

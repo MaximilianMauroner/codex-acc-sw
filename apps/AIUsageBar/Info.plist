@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>AI Usage Bar uses Terminal to start Codex login when you choose a login action.</string>
 </dict>
 </plist>

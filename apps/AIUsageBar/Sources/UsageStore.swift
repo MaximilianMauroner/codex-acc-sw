@@ -27,7 +27,7 @@ final class UsageStore: ObservableObject {
     }
 
     var activeCodexAccount: UsageAccount? {
-        codexAccounts.first { $0.isActive } ?? codexAccounts.first
+        codexAccounts.first { $0.isActive }
     }
 
     var workingCodexAccounts: [UsageAccount] {
@@ -184,6 +184,10 @@ final class UsageStore: ObservableObject {
     }
 
     func canShowInTopBar(_ account: UsageAccount) -> Bool {
+        hasTopBarBudget(account)
+    }
+
+    func canConfigureTopBarVisibility(_ account: UsageAccount) -> Bool {
         account.preferenceID != nil && hasTopBarBudget(account)
     }
 
@@ -291,9 +295,6 @@ final class UsageStore: ObservableObject {
     }
 
     private func topBarUnavailableReason(for account: UsageAccount) -> String {
-        if account.preferenceID == nil {
-            return "Waiting for account identity"
-        }
         if account.snapshot?.isFreePlan == true {
             return "Free plan"
         }

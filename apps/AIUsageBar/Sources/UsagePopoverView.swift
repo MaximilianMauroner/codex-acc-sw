@@ -250,6 +250,7 @@ private struct TopBarToggleRow: View {
 
     var body: some View {
         let canShow = store.canShowInTopBar(account)
+        let canConfigure = store.canConfigureTopBarVisibility(account)
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
@@ -279,7 +280,7 @@ private struct TopBarToggleRow: View {
             ))
             .labelsHidden()
             .toggleStyle(.switch)
-            .disabled(!canShow)
+            .disabled(!canConfigure)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

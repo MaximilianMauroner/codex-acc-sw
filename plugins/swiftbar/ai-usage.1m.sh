@@ -61,6 +61,10 @@ acquire_refresh_lock() {
     owner_pid="$(<"$lock_dir/pid")"
   else
     owner_pid=""
+    sleep 0.05
+    if [[ -f "$lock_dir/pid" ]]; then
+      owner_pid="$(<"$lock_dir/pid")"
+    fi
   fi
   if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
     return 1
