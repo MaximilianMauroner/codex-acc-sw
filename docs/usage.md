@@ -133,7 +133,7 @@ Use the Actions screen to switch Codex accounts, save the current login, prepare
 
 The `x` button hides the popover. To quit the app, open the About screen from the header and use `Quit AI Usage Bar`.
 
-The cost chart uses [context-bar](https://github.com/htahaozlu/context-bar)'s `daily --json --instances` report. The app prefers an installed `context-bar` binary, then falls back to `npx context-bar@latest daily --json --instances` if `npx` is available. Cost values are estimates derived from local transcript usage and model pricing, not provider billing statements.
+The cost chart uses [context-bar](https://github.com/htahaozlu/context-bar)'s `daily --json --instances` report. Install `context-bar` first, or set `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app. The app does not invoke `npx` or download mutable package code automatically. Cost values are estimates derived from local transcript usage and model pricing, not provider billing statements.
 
 Claude Code usage is fetched from the macOS Keychain generic-password item with service `Claude Code-credentials`. See [Claude auth notes](claude-auth.md) for the local storage findings and what would be needed for future Claude profile switching.
 
@@ -199,7 +199,8 @@ For usage reporting:
 | `~/.codex/accounts/<name>.auth.json` | Saved account credentials |
 | `~/.codex/switch/state` | Active account state used for switching |
 | `~/.codex/switch/config` | Output configuration |
-| `~/.codex/switch/usage-cache/*.json` | Last successful usage snapshots used for stale widget/status rows |
+| `~/.codex/switch/usage-cache/codex/<account-name-sha256>.json` | Last successful Codex usage snapshots, keyed by the account name's SHA-256 value |
+| `~/.codex/switch/usage-cache/claude/usage.json` | Last successful Claude usage snapshot |
 
 ## Notes
 

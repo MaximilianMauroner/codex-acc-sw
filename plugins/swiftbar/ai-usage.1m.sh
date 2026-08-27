@@ -36,18 +36,53 @@ resolve_command() {
 }
 
 COMMAND="$(resolve_command || true)"
-LIVE_OUTPUT="${TMPDIR:-/tmp}/codex-account-switch-widget-live-${UID}.swiftbar"
+RUNTIME_DIR="${HOME}/.codex/switch/swiftbar-runtime"
+mkdir -p "$RUNTIME_DIR"
+chmod 700 "$RUNTIME_DIR"
+LIVE_OUTPUT="${RUNTIME_DIR}/live.swiftbar"
 
-refresh_cache_in_background() {
-  local lock_dir="${TMPDIR:-/tmp}/codex-account-switch-widget-refresh.lock"
-  local output_tmp
+release_refresh_lock() {
+  local lock_dir="$1"
+  rm -f "$lock_dir/pid"
+  rmdir "$lock_dir" 2>/dev/null || true
+}
 
-  if ! mkdir "$lock_dir" 2>/dev/null; then
+acquire_refresh_lock() {
+  local lock_dir="$1"
+  local owner_pid stale_dir current_pid
+  current_pid="$(/bin/sh -c 'printf "%s\n" "$PPID"')"
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$current_pid" > "$lock_dir/pid"
     return 0
   fi
 
-  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
-  output_tmp="$(mktemp "${TMPDIR:-/tmp}/codex-account-switch-widget.XXXXXX")"
+  owner_pid="$(<"$lock_dir/pid" 2>/dev/null || true)"
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    return 1
+  fi
+
+  stale_dir="${lock_dir}.stale.${current_pid}"
+  if ! mv "$lock_dir" "$stale_dir" 2>/dev/null; then
+    return 1
+  fi
+  rm -f "$stale_dir/pid"
+  rmdir "$stale_dir" 2>/dev/null || true
+
+  mkdir "$lock_dir" 2>/dev/null || return 1
+  printf '%s\n' "$current_pid" > "$lock_dir/pid"
+}
+
+refresh_cache_in_background() {
+  local lock_dir="${RUNTIME_DIR}/refresh.lock"
+  local output_tmp
+
+  if ! acquire_refresh_lock "$lock_dir"; then
+    return 0
+  fi
+
+  trap "release_refresh_lock $(printf '%q' "$lock_dir")" EXIT
+  output_tmp="$(mktemp "${RUNTIME_DIR}/widget.XXXXXX")"
   if SWIFTBAR_PLUGIN_REFRESH_REASON="${SWIFTBAR_PLUGIN_REFRESH_REASON:-scheduled}" \
     "$COMMAND" widget --format swiftbar >"$output_tmp" 2>/dev/null; then
     chmod 600 "$output_tmp"

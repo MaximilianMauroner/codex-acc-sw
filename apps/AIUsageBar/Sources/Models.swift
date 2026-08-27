@@ -15,6 +15,7 @@ struct UsagePayload: Decodable {
 struct UsageAccount: Decodable, Identifiable {
     let provider: String
     let name: String
+    let accountIdentity: String?
     let isActive: Bool
     let status: String
     let message: String
@@ -23,6 +24,11 @@ struct UsageAccount: Decodable, Identifiable {
 
     var id: String {
         "\(provider):\(name)"
+    }
+
+    var historyID: String? {
+        guard let accountIdentity, !accountIdentity.isEmpty else { return nil }
+        return "\(provider):\(accountIdentity)"
     }
 
     var isClaude: Bool {

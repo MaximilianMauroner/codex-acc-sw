@@ -312,6 +312,7 @@ private struct TopBarStatusPill: View {
 private struct ActionsScreen: View {
     @ObservedObject var store: UsageStore
     @State private var accountName = ""
+    @State private var backupName = ""
     @State private var selectedAccountName = ""
     @State private var renameTarget = ""
     @State private var pendingLoginName: String?
@@ -337,7 +338,12 @@ private struct ActionsScreen: View {
                                 CodexCommandAccountRow(
                                     account: account,
                                     isRunning: isRunning,
-                                    onSwitch: { runCommand(["switch", account.name]) }
+                                    onSwitch: {
+                                        runCommand(
+                                            ["switch", account.name],
+                                            promptResponse: normalizedBackupName
+                                        )
+                                    }
                                 )
                                 if index < accounts.count - 1 {
                                     Divider()
@@ -345,6 +351,12 @@ private struct ActionsScreen: View {
                             }
                         }
                     }
+                    TextField("Unsaved current login backup name (if needed)", text: $backupName)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isRunning)
+                    Text("Used by Switch and Prepare Login if the current login has not been saved yet.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
 
                 ActionSection(
@@ -368,7 +380,7 @@ private struct ActionsScreen: View {
 
                             Button {
                                 let name = normalizedAccountName
-                                runCommand(["add", name]) {
+                                runCommand(["add", name], promptResponse: normalizedBackupName) {
                                     pendingLoginName = name
                                 }
                             } label: {
@@ -391,6 +403,9 @@ private struct ActionsScreen: View {
                             }
                         }
                         Text("Prepare Login removes the active Codex auth after saving the current one if it can be identified.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Text("If the current login is not already saved, its backup name is supplied to the command without an interactive Terminal prompt.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -474,6 +489,11 @@ private struct ActionsScreen: View {
         renameTarget.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var normalizedBackupName: String {
+        let value = backupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return isValidAccountName(value) ? value : ""
+    }
+
     private var canUseTypedName: Bool {
         isValidAccountName(normalizedAccountName)
     }
@@ -501,11 +521,15 @@ private struct ActionsScreen: View {
             && name != ".."
     }
 
-    private func runCommand(_ arguments: [String], onSuccess: (() -> Void)? = nil) {
+    private func runCommand(
+        _ arguments: [String],
+        promptResponse: String? = nil,
+        onSuccess: (() -> Void)? = nil
+    ) {
         isRunning = true
         removeConfirmationName = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = runner.run(arguments)
+            let result = runner.run(arguments, promptResponse: promptResponse)
             DispatchQueue.main.async {
                 commandOutput = result
                 isRunning = false
@@ -827,6 +851,20 @@ private struct CostHistoryCard: View {
             }
 
             if let history = store.costHistory {
+                if let error = store.costErrorMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Label("Refresh failed: \(error)", systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button("Retry") {
+                            store.refreshCostHistory(force: true)
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(store.isRefreshingCost)
+                    }
+                }
                 let focusedDay = selectedDay(in: history)
                 CostBarChart(history: history, selectedDayID: $selectedDayID)
                     .frame(height: 106)
@@ -871,6 +909,9 @@ private struct CostHistoryCard: View {
             return "Loading 30 days from context-bar"
         }
         if let history = store.costHistory {
+            if store.costErrorMessage != nil {
+                return "Refresh failed · cached \(TimeText.relativeAge(history.generatedAt))"
+            }
             return "30 days · \(TimeText.relativeAge(history.generatedAt))"
         }
         return "30 days · estimated from local transcripts"

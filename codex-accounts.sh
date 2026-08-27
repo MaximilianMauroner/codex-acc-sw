@@ -116,6 +116,13 @@ if account_id:
 PY
 }
 
+account_identity_for_auth_path() {
+  local account_id
+  account_id="$(account_id_for_auth_path "$1")"
+  [[ -n "${account_id:-}" ]] || return 0
+  printf '%s' "$account_id" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
 current_account_name_from_auth() {
   [[ -f "$AUTH_FILE" ]] || return 0
 
@@ -713,6 +720,7 @@ append_widget_state_line() {
   local message="${5:-}"
   local stale="${6:-0}"
   local snapshot_json="${7:-}"
+  local account_identity="${8:-}"
 
   python3 - \
     "$provider" \
@@ -721,11 +729,12 @@ append_widget_state_line() {
     "$status" \
     "$message" \
     "$stale" \
-    "$snapshot_json" <<'PY'
+    "$snapshot_json" \
+    "$account_identity" <<'PY'
 import json
 import sys
 
-provider, name, is_active, status, message, stale, snapshot_raw = sys.argv[1:]
+provider, name, is_active, status, message, stale, snapshot_raw, account_identity = sys.argv[1:]
 snapshot = None
 if snapshot_raw:
     try:
@@ -738,6 +747,7 @@ print(
         {
             "provider": provider,
             "name": name,
+            "account_identity": account_identity or None,
             "is_active": is_active == "1",
             "status": status,
             "message": message,
@@ -756,7 +766,7 @@ collect_codex_widget_lines() {
   local mode="${3:-live}"
 
   shopt -s nullglob
-  local f base auth_path is_active result_json status message snapshot_json cached_snapshot_json cache_path
+  local f base auth_path is_active account_identity result_json status message snapshot_json cached_snapshot_json cache_path
   for f in "$DATA_DIR"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
@@ -767,11 +777,12 @@ collect_codex_widget_lines() {
       auth_path="$AUTH_FILE"
       is_active=1
     fi
+    account_identity="$(account_identity_for_auth_path "$auth_path")"
 
     cache_path="$(usage_cache_path_for "$base")"
     if [[ "$mode" == "cached" ]]; then
       if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
-        append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$cached_snapshot_json"
+        append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$cached_snapshot_json" "$account_identity"
       else
         append_widget_state_line \
           "codex" \
@@ -779,7 +790,9 @@ collect_codex_widget_lines() {
           "$is_active" \
           "no_cache" \
           "No cached Codex usage yet. A background refresh is running." \
-          "0"
+          "0" \
+          "" \
+          "$account_identity"
       fi
       continue
     fi
@@ -793,7 +806,7 @@ collect_codex_widget_lines() {
       if [[ "$auth_path" == "$AUTH_FILE" ]]; then
         sync_active_auth_to_saved_account "$base" >/dev/null 2>&1 || true
       fi
-      append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json"
+      append_widget_state_line "codex" "$base" "$is_active" "ok" "" "0" "$snapshot_json" "$account_identity"
       continue
     fi
 
@@ -805,7 +818,8 @@ collect_codex_widget_lines() {
         "$status" \
         "$message Showing cached data." \
         "1" \
-        "$cached_snapshot_json"
+        "$cached_snapshot_json" \
+        "$account_identity"
     else
       append_widget_state_line \
         "codex" \
@@ -813,7 +827,9 @@ collect_codex_widget_lines() {
         "$is_active" \
         "$status" \
         "$message" \
-        "0"
+        "0" \
+        "" \
+        "$account_identity"
     fi
   done
 }
@@ -1747,9 +1763,14 @@ auth_files_match() {
   local left_account_id right_account_id
   left_account_id="$(account_id_for_auth_path "$left")"
   right_account_id="$(account_id_for_auth_path "$right")"
-  [[ -n "${left_account_id:-}" ]] || return 1
-  [[ -n "${right_account_id:-}" ]] || return 1
-  [[ "$left_account_id" == "$right_account_id" ]]
+  if [[ -n "${left_account_id:-}" && -n "${right_account_id:-}" ]]; then
+    [[ "$left_account_id" == "$right_account_id" ]]
+    return
+  fi
+
+  # This helper is used only for explicit/manual backup operations. Legacy auth
+  # files without account IDs may be overwritten only when content is identical.
+  cmp -s "$left" "$right"
 }
 
 assert_auth_present_or_hint() {

@@ -88,13 +88,13 @@ Use the Actions screen to switch Codex accounts, save the current login, prepare
 
 The `x` button hides the popover. To quit the app, open the About screen from the header and use `Quit AI Usage Bar`.
 
-Cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). For faster refreshes, install it once:
+Cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). Install it once:
 
 ```bash
 npm install -g context-bar
 ```
 
-If `context-bar` is not installed, the app falls back to `npx context-bar@latest daily --json --instances` when `npx` is available.
+The app does not download or execute npm packages automatically. It uses an installed `context-bar` executable, or the executable selected by setting `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app.
 
 ## Optional SwiftBar widget
 

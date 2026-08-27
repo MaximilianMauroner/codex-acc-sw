@@ -30,25 +30,27 @@ struct UsageHistory: Codable {
             guard account.status == "ok", !account.stale, let snapshot = account.snapshot else {
                 continue
             }
+            guard let historyID = account.historyID else { continue }
             let timestamp = snapshot.lastSeenDate ?? Date()
             let sample = HistorySample(
                 timestamp: timestamp,
                 currentRemaining: snapshot.currentRemainingPercent,
                 weeklyRemaining: snapshot.weeklyRemainingPercent
             )
-            var samples = samplesByAccount[account.id] ?? []
+            var samples = samplesByAccount[historyID] ?? []
             if let last = samples.last, abs(last.timestamp.timeIntervalSince(timestamp)) < 30 {
                 samples[samples.count - 1] = sample
             } else {
                 samples.append(sample)
             }
             samples = Array(samples.suffix(240))
-            samplesByAccount[account.id] = samples
+            samplesByAccount[historyID] = samples
         }
     }
 
     func samples(for account: UsageAccount) -> [HistorySample] {
-        samplesByAccount[account.id] ?? []
+        guard let historyID = account.historyID else { return [] }
+        return samplesByAccount[historyID] ?? []
     }
 
     func values(for account: UsageAccount, period: BudgetPeriod) -> [Double] {

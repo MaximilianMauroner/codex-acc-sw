@@ -30,7 +30,7 @@ struct CLIRunner {
             : ["widget", "--format", "json", "--timeout", "8"]
         process.environment = augmentedEnvironment()
 
-        let result = try ProcessCapture.run(process, timeout: 30)
+        let result = try ProcessCapture.run(process, timeout: liveProcessTimeout(cached: cached))
         guard result.status == 0, !result.timedOut else {
             let message = String(data: result.error, encoding: .utf8) ?? ""
             throw CLIRunnerError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -43,6 +43,20 @@ struct CLIRunner {
         } catch {
             throw CLIRunnerError.invalidOutput
         }
+    }
+
+    private func liveProcessTimeout(cached: Bool) -> TimeInterval {
+        guard !cached else { return 30 }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let accounts = home.appendingPathComponent(".codex/accounts", isDirectory: true)
+        let count = (try? FileManager.default.contentsOfDirectory(
+            at: accounts,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.lastPathComponent.hasSuffix(".auth.json") }.count) ?? 0
+        // The shell currently fetches Codex accounts and Claude sequentially.
+        // Cover every per-provider 8-second deadline plus process startup/output.
+        return max(30, TimeInterval(count + 1) * 8 + 10)
     }
 
     private func resolveCommand() -> String? {

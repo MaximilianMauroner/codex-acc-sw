@@ -99,13 +99,13 @@ The app runs without a Dock icon and stores its local sparkline history at:
 ~/Library/Application Support/AIUsageBar/history.json
 ```
 
-Its 30-day cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). Install it globally for faster refreshes:
+Its 30-day cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). Install it globally:
 
 ```bash
 npm install -g context-bar
 ```
 
-If no `context-bar` executable is found, the app falls back to `npx context-bar@latest daily --json --instances` when `npx` is available. Set `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app to force a specific binary.
+The app does not invoke `npx` or download a package automatically. It requires an installed `context-bar` executable. Set `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app to select a specific binary.
 
 ## Optional SwiftBar widget
 

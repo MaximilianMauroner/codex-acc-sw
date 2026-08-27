@@ -7,7 +7,7 @@ struct AccountCommandOutput {
 }
 
 struct AccountCommandRunner {
-    func run(_ arguments: [String]) -> AccountCommandOutput {
+    func run(_ arguments: [String], promptResponse: String? = nil) -> AccountCommandOutput {
         guard let command = resolveCommand() else {
             return AccountCommandOutput(
                 succeeded: false,
@@ -26,6 +26,9 @@ struct AccountCommandRunner {
 
         let result: CapturedProcessResult
         do {
+            if let promptResponse, !promptResponse.isEmpty {
+                input.fileHandleForWriting.write(Data("\(promptResponse)\n".utf8))
+            }
             input.fileHandleForWriting.closeFile()
             result = try ProcessCapture.run(process, timeout: 30)
         } catch {
