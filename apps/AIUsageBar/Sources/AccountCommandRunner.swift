@@ -22,16 +22,12 @@ struct AccountCommandRunner {
         process.environment = augmentedEnvironment()
 
         let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
         process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
 
+        let result: CapturedProcessResult
         do {
             input.fileHandleForWriting.closeFile()
-            try process.run()
-            process.waitUntilExit()
+            result = try ProcessCapture.run(process, timeout: 30)
         } catch {
             return AccountCommandOutput(
                 succeeded: false,
@@ -40,22 +36,29 @@ struct AccountCommandRunner {
             )
         }
 
-        let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let outputText = String(data: result.output, encoding: .utf8) ?? ""
+        let errorText = String(data: result.error, encoding: .utf8) ?? ""
         let detail = stripANSI([outputText, errorText]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n"))
-        let succeeded = process.terminationStatus == 0
+        let succeeded = result.status == 0 && !result.timedOut
 
         return AccountCommandOutput(
             succeeded: succeeded,
             title: succeeded ? "Done" : "Command failed",
-            detail: detail.isEmpty ? "Exit code \(process.terminationStatus)" : detail
+            detail: detail.isEmpty ? "Exit code \(result.status)" : detail
         )
     }
 
     func openCodexLoginTerminal(accountName: String) -> AccountCommandOutput {
+        guard let accountCommand = resolveCommand() else {
+            return AccountCommandOutput(
+                succeeded: false,
+                title: "Command unavailable",
+                detail: "codex-account-switch was not found. Install it or set CODEX_ACCOUNT_SWITCH_BIN."
+            )
+        }
         let path = [
             "\(home)/.local/bin",
             "/opt/homebrew/bin",
@@ -69,7 +72,7 @@ struct AccountCommandRunner {
         let command = [
             "export PATH=\(shellQuoted(path)):\"$PATH\"",
             "codex login",
-            "codex-account-switch save \(shellQuoted(accountName))",
+            "\(shellQuoted(accountCommand)) save \(shellQuoted(accountName))",
             "echo",
             "echo \(shellQuoted(finishedMessage))"
         ].joined(separator: " && ")
@@ -84,14 +87,9 @@ struct AccountCommandRunner {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
 
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-
+        let result: CapturedProcessResult
         do {
-            try process.run()
-            process.waitUntilExit()
+            result = try ProcessCapture.run(process, timeout: 30)
         } catch {
             return AccountCommandOutput(
                 succeeded: false,
@@ -100,13 +98,13 @@ struct AccountCommandRunner {
             )
         }
 
-        let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let outputText = String(data: result.output, encoding: .utf8) ?? ""
+        let errorText = String(data: result.error, encoding: .utf8) ?? ""
         let detail = [outputText, errorText]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
-        let succeeded = process.terminationStatus == 0
+        let succeeded = result.status == 0 && !result.timedOut
 
         return AccountCommandOutput(
             succeeded: succeeded,

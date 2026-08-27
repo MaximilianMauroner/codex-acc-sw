@@ -50,7 +50,7 @@ enum CostRunnerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .commandNotFound:
-            return "context-bar was not found. Install it with npm, or keep npx available for automatic loading."
+            return "context-bar was not found. Install it with npm or set CONTEXT_BAR_BIN."
         case .commandFailed(let message):
             return message.isEmpty ? "context-bar failed to load cost history." : message
         case .timedOut:
@@ -82,27 +82,18 @@ struct CostRunner {
         process.arguments = request.argumentsPrefix + reportArguments
         process.environment = augmentedEnvironment()
 
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-
-        try process.run()
-        let waitResult = waitForProcess(process, timeout: 25)
-        if waitResult == .timedOut {
-            process.terminate()
+        let result = try ProcessCapture.run(process, timeout: 25)
+        if result.timedOut {
             throw CostRunnerError.timedOut
         }
 
-        let outputData = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = error.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: errorData, encoding: .utf8) ?? ""
+        guard result.status == 0 else {
+            let message = String(data: result.error, encoding: .utf8) ?? ""
             throw CostRunnerError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
         return try parseHistory(
-            outputData,
+            result.output,
             source: request.displayName,
             dayCount: dayCount,
             startDate: window.startDate
@@ -124,14 +115,6 @@ struct CostRunner {
                 executable: contextBar,
                 argumentsPrefix: [],
                 displayName: "context-bar"
-            )
-        }
-
-        if let npx = firstExecutable(named: "npx") {
-            return CommandRequest(
-                executable: npx,
-                argumentsPrefix: ["--yes", "context-bar@latest"],
-                displayName: "npx context-bar@latest"
             )
         }
 
@@ -212,16 +195,6 @@ struct CostRunner {
             pricingIsEstimate: root?["pricing_is_estimate"] as? Bool ?? true,
             generatedAt: Date()
         )
-    }
-
-    private func waitForProcess(_ process: Process, timeout: TimeInterval) -> DispatchTimeoutResult {
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global(qos: .utility).async {
-            process.waitUntilExit()
-            group.leave()
-        }
-        return group.wait(timeout: .now() + timeout)
     }
 
     private func candidateRows(in object: Any) -> [[String: Any]] {

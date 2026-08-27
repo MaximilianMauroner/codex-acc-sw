@@ -38,7 +38,12 @@ is_help_flag() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CODEX_HOME" "$DATA_DIR" "$STATE_DIR" "$USAGE_CACHE_DIR"
+  mkdir -p \
+    "$CODEX_HOME" \
+    "$DATA_DIR" \
+    "$STATE_DIR" \
+    "$USAGE_CACHE_DIR/codex" \
+    "$USAGE_CACHE_DIR/claude"
 }
 
 load_state() {
@@ -136,6 +141,10 @@ resolved_current_account_name() {
   detected="$(current_account_name_from_auth)"
   if [[ -n "${detected:-}" ]]; then
     echo "$detected"
+  elif [[ -f "$AUTH_FILE" ]]; then
+    # A live auth that cannot be positively matched must not inherit stale state.
+    # Otherwise an automatic usage refresh could overwrite CURRENT's saved auth.
+    return 0
   else
     echo "${CURRENT:-}"
   fi
@@ -148,6 +157,36 @@ fetch_live_usage_snapshot() {
     "$SCRIPT_DIR/scripts/fetch_codex_rate_limits.py" \
     "$auth_path" \
     "$timeout_seconds"
+}
+
+fetch_live_usage_result_json() {
+  local auth_path="${1:-$AUTH_FILE}"
+  local timeout_seconds="${2:-$USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS}"
+  local snapshot_json error_file error_json status message
+  error_file="$(mktemp)"
+  if snapshot_json="$(fetch_live_usage_snapshot "$auth_path" "$timeout_seconds" 2>"$error_file")"; then
+    rm -f "$error_file"
+    python3 - "$snapshot_json" <<'PY'
+import json
+import sys
+
+print(json.dumps({"status": "ok", "message": "", "snapshot": json.loads(sys.argv[1])}, separators=(",", ":")))
+PY
+    return 0
+  fi
+
+  error_json="$(<"$error_file")"
+  rm -f "$error_file"
+  status="$(json_field_value "$error_json" "status")"
+  message="$(json_field_value "$error_json" "message")"
+  [[ -n "${status:-}" ]] || status="fetch_failed"
+  [[ -n "${message:-}" ]] || message="Codex usage could not be fetched."
+  python3 - "$status" "$message" <<'PY'
+import json
+import sys
+
+print(json.dumps({"status": sys.argv[1], "message": sys.argv[2], "snapshot": None}, separators=(",", ":")))
+PY
 }
 
 fetch_claude_status_json() {
@@ -329,6 +368,13 @@ sync_active_auth_to_saved_account() {
   dest="$(auth_path_for "$name")"
   [[ -f "$AUTH_FILE" ]] || return 0
   [[ -f "$dest" ]] || return 0
+
+  local live_account_id saved_account_id
+  live_account_id="$(account_id_for_auth_path "$AUTH_FILE")"
+  saved_account_id="$(account_id_for_auth_path "$dest")"
+  [[ -n "${live_account_id:-}" ]] || return 1
+  [[ -n "${saved_account_id:-}" ]] || return 1
+  [[ "$live_account_id" == "$saved_account_id" ]] || return 1
 
   cp "$AUTH_FILE" "$dest"
   chmod 600 "$dest"
@@ -551,20 +597,24 @@ fetch_and_format_usage_for_auth_path() {
   local is_active="${4:-0}"
   local max_name_len="${5:-${#name}}"
 
-  local snapshot_json
-  if ! snapshot_json="$(fetch_live_usage_snapshot "$auth_path" "$timeout_seconds" 2>/dev/null)"; then
+  local result_json snapshot_json status message
+  result_json="$(fetch_live_usage_result_json "$auth_path" "$timeout_seconds")"
+  status="$(json_field_value "$result_json" "status")"
+  if [[ "$status" != "ok" ]]; then
     if format_cached_usage_snapshot "$name" "$is_active" "$max_name_len"; then
       return 0
     fi
 
     local marker="  "
     [[ "$is_active" == "1" ]] && marker="* "
-    printf "%s%-*s  login expired\n" "$marker" "$max_name_len" "$name"
+    message="$(status_label_for "$status")"
+    printf "%s%-*s  %s\n" "$marker" "$max_name_len" "$name" "$message"
     return 1
   fi
 
-  mkdir -p "$USAGE_CACHE_DIR"
-  printf '%s\n' "$snapshot_json" > "$(usage_cache_path_for "$name")"
+  snapshot_json="$(json_snapshot_value "$result_json")"
+
+  write_usage_cache_snapshot "$(usage_cache_path_for "$name")" "$snapshot_json"
 
   if [[ "$auth_path" == "$AUTH_FILE" ]]; then
     sync_active_auth_to_saved_account "$name" >/dev/null 2>&1 || true
@@ -597,11 +647,25 @@ auth_path_for() {
 
 usage_cache_path_for() {
   local name="$1"
-  echo "${USAGE_CACHE_DIR}/${name}.json"
+  local key
+  key="$(printf '%s' "$name" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  echo "${USAGE_CACHE_DIR}/codex/${key}.json"
 }
 
 claude_usage_cache_path() {
-  echo "${USAGE_CACHE_DIR}/claude.json"
+  echo "${USAGE_CACHE_DIR}/claude/usage.json"
+}
+
+write_usage_cache_snapshot() {
+  local cache_path="$1"
+  local snapshot_json="$2"
+  local cache_dir tmp
+  cache_dir="$(dirname -- "$cache_path")"
+  mkdir -p "$cache_dir"
+  tmp="$(mktemp "${cache_dir}/.usage.XXXXXX")"
+  printf '%s\n' "$snapshot_json" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$cache_path"
 }
 
 json_field_value() {
@@ -692,7 +756,7 @@ collect_codex_widget_lines() {
   local mode="${3:-live}"
 
   shopt -s nullglob
-  local f base auth_path is_active snapshot_json cached_snapshot_json cache_path
+  local f base auth_path is_active result_json status message snapshot_json cached_snapshot_json cache_path
   for f in "$DATA_DIR"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
@@ -720,9 +784,12 @@ collect_codex_widget_lines() {
       continue
     fi
 
-    if snapshot_json="$(fetch_live_usage_snapshot "$auth_path" "$timeout_seconds" 2>/dev/null)"; then
-      mkdir -p "$USAGE_CACHE_DIR"
-      printf '%s\n' "$snapshot_json" > "$(usage_cache_path_for "$base")"
+    result_json="$(fetch_live_usage_result_json "$auth_path" "$timeout_seconds")"
+    status="$(json_field_value "$result_json" "status")"
+    message="$(json_field_value "$result_json" "message")"
+    if [[ "$status" == "ok" ]]; then
+      snapshot_json="$(json_snapshot_value "$result_json")"
+      write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
       if [[ "$auth_path" == "$AUTH_FILE" ]]; then
         sync_active_auth_to_saved_account "$base" >/dev/null 2>&1 || true
       fi
@@ -735,8 +802,8 @@ collect_codex_widget_lines() {
         "codex" \
         "$base" \
         "$is_active" \
-        "fetch_failed" \
-        "Live Codex usage unavailable; showing cached data." \
+        "$status" \
+        "$message Showing cached data." \
         "1" \
         "$cached_snapshot_json"
     else
@@ -744,8 +811,8 @@ collect_codex_widget_lines() {
         "codex" \
         "$base" \
         "$is_active" \
-        "login_expired" \
-        "Switch to this account and run codex login." \
+        "$status" \
+        "$message" \
         "0"
     fi
   done
@@ -774,8 +841,7 @@ collect_claude_widget_line() {
 
   if result_json="$(fetch_claude_status_json "$timeout_seconds" 2>/dev/null)"; then
     snapshot_json="$(json_snapshot_value "$result_json")" || return 0
-    mkdir -p "$USAGE_CACHE_DIR"
-    printf '%s\n' "$snapshot_json" > "$(claude_usage_cache_path)"
+    write_usage_cache_snapshot "$(claude_usage_cache_path)" "$snapshot_json"
     append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$snapshot_json"
     return 0
   fi
@@ -854,12 +920,15 @@ build_widget_snapshot_json() {
 
   ensure_dirs
   load_state
+  load_config
   active_current="$(resolved_current_account_name)"
   tmp="$(mktemp)"
 
   {
     collect_codex_widget_lines "$timeout_seconds" "$active_current" "$mode"
-    collect_claude_widget_line "$timeout_seconds" "$mode"
+    if [[ "$DISPLAY_SHOW_CLAUDE" == "1" ]]; then
+      collect_claude_widget_line "$timeout_seconds" "$mode"
+    fi
   } > "$tmp"
 
   if python3 - "$tmp" "$active_current" "$mode" <<'PY'
@@ -1599,6 +1668,7 @@ labels = {
     "missing_security": "security command missing",
     "missing_token": "login needed",
     "network_error": "network error",
+    "no_cache": "checking usage",
     "unauthorized": "login needed",
 }
 
@@ -1677,12 +1747,9 @@ auth_files_match() {
   local left_account_id right_account_id
   left_account_id="$(account_id_for_auth_path "$left")"
   right_account_id="$(account_id_for_auth_path "$right")"
-  if [[ -n "${left_account_id:-}" && -n "${right_account_id:-}" ]]; then
-    [[ "$left_account_id" == "$right_account_id" ]]
-    return
-  fi
-
-  cmp -s "$left" "$right"
+  [[ -n "${left_account_id:-}" ]] || return 1
+  [[ -n "${right_account_id:-}" ]] || return 1
+  [[ "$left_account_id" == "$right_account_id" ]]
 }
 
 assert_auth_present_or_hint() {
@@ -2068,6 +2135,14 @@ EOF
 
   mv "$old_path" "$new_path"
 
+  local old_cache new_cache
+  old_cache="$(usage_cache_path_for "$old_name")"
+  new_cache="$(usage_cache_path_for "$new_name")"
+  if [[ -f "$old_cache" ]]; then
+    mkdir -p "$(dirname -- "$new_cache")"
+    mv -f "$old_cache" "$new_cache"
+  fi
+
   load_state
   if [[ "${CURRENT:-}" == "$old_name" ]]; then
     CURRENT="$new_name"
@@ -2107,7 +2182,7 @@ EOF
   target_path="$(auth_path_for "$name")"
   [[ -f "$target_path" ]] || die "No saved account named '${name}'. Use '${COMMAND_NAME} list' to see options."
 
-  rm -f "$target_path"
+  rm -f "$target_path" "$(usage_cache_path_for "$name")"
 
   if [[ "${CURRENT:-}" == "$name" ]]; then
     CURRENT=""

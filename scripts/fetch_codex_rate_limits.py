@@ -19,6 +19,12 @@ REFRESH_GRACE_SECONDS = 60
 REFRESH_MAX_AGE_DAYS = 8
 
 
+class FetchError(RuntimeError):
+    def __init__(self, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -28,8 +34,15 @@ def now_iso() -> str:
 
 
 def load_auth(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:
+        raise FetchError("missing_credentials", "Codex auth file was not found.") from exc
+    except json.JSONDecodeError as exc:
+        raise FetchError("invalid_response", "Codex auth file contains invalid JSON.") from exc
+    except OSError as exc:
+        raise FetchError("fetch_failed", "Codex auth file could not be read.") from exc
 
 
 def write_auth(path: str, data: dict) -> None:
@@ -140,7 +153,7 @@ def refresh_tokens(auth_path: str, auth: dict, timeout_seconds: float) -> dict:
     tokens = auth.get("tokens") or {}
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
-        raise RuntimeError("missing refresh token")
+        raise FetchError("missing_token", "Codex auth has no refresh token.")
 
     body = urllib.parse.urlencode(
         {
@@ -161,7 +174,9 @@ def refresh_tokens(auth_path: str, auth: dict, timeout_seconds: float) -> dict:
         body,
     )
     if status < 200 or status >= 300:
-        raise RuntimeError(f"token refresh failed: {status}")
+        if status in (400, 401, 403):
+            raise FetchError("login_expired", "Codex login has expired.")
+        raise FetchError("fetch_failed", f"Codex token refresh failed ({status}).")
 
     new_tokens = dict(tokens)
     for key in ("access_token", "refresh_token", "id_token"):
@@ -180,7 +195,7 @@ def fetch_usage(auth: dict, timeout_seconds: float) -> tuple[int, dict]:
     access_token = tokens.get("access_token")
     account_id = tokens.get("account_id")
     if not access_token:
-        raise RuntimeError("missing access token")
+        raise FetchError("missing_token", "Codex auth has no access token.")
 
     cache_bust = int(utcnow().timestamp() * 1000)
     headers = {
@@ -209,7 +224,7 @@ def build_snapshot(payload: dict) -> dict:
     weekly_used = secondary.get("used_percent")
 
     if current_used is None and weekly_used is None:
-        raise RuntimeError("usage payload missing rate-limit percentages")
+        raise FetchError("invalid_response", "Codex usage response was missing rate limits.")
 
     current_window_seconds = primary.get("limit_window_seconds")
     weekly_window_seconds = secondary.get("limit_window_seconds")
@@ -250,13 +265,28 @@ def main() -> int:
             auth = refresh_tokens(auth_path, auth, timeout_seconds)
             status, payload = fetch_usage(auth, timeout_seconds)
 
+        if status in (401, 403):
+            raise FetchError("login_expired", "Codex login has expired.")
         if status < 200 or status >= 300:
-            return 1
+            raise FetchError("fetch_failed", f"Codex usage request failed ({status}).")
 
         snapshot = build_snapshot(payload)
         print(json.dumps(snapshot, separators=(",", ":")))
         return 0
-    except Exception:
+    except FetchError as exc:
+        print(json.dumps({"status": exc.status, "message": str(exc)}), file=sys.stderr)
+        return 1
+    except (TimeoutError, urllib.error.URLError) as exc:
+        print(
+            json.dumps({"status": "network_error", "message": f"Codex usage network error: {exc}"}),
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:
+        print(
+            json.dumps({"status": "fetch_failed", "message": f"Codex usage could not be fetched: {exc}"}),
+            file=sys.stderr,
+        )
         return 1
 
 

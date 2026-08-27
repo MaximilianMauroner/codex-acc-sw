@@ -36,16 +36,25 @@ resolve_command() {
 }
 
 COMMAND="$(resolve_command || true)"
+LIVE_OUTPUT="${TMPDIR:-/tmp}/codex-account-switch-widget-live-${UID}.swiftbar"
 
 refresh_cache_in_background() {
   local lock_dir="${TMPDIR:-/tmp}/codex-account-switch-widget-refresh.lock"
+  local output_tmp
 
   if ! mkdir "$lock_dir" 2>/dev/null; then
     return 0
   fi
 
   trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
-  "$COMMAND" widget --refresh-cache >/dev/null 2>&1 || true
+  output_tmp="$(mktemp "${TMPDIR:-/tmp}/codex-account-switch-widget.XXXXXX")"
+  if SWIFTBAR_PLUGIN_REFRESH_REASON="${SWIFTBAR_PLUGIN_REFRESH_REASON:-scheduled}" \
+    "$COMMAND" widget --format swiftbar >"$output_tmp" 2>/dev/null; then
+    chmod 600 "$output_tmp"
+    mv -f "$output_tmp" "$LIVE_OUTPUT"
+  else
+    rm -f "$output_tmp"
+  fi
 }
 
 if [[ -z "${COMMAND:-}" ]]; then
@@ -58,6 +67,11 @@ if [[ -z "${COMMAND:-}" ]]; then
 fi
 
 refresh_cache_in_background >/dev/null 2>&1 &
+
+if [[ -s "$LIVE_OUTPUT" && -n "$(find "$LIVE_OUTPUT" -mmin -3 -print -quit 2>/dev/null)" ]]; then
+  cat "$LIVE_OUTPUT"
+  exit 0
+fi
 
 if ! output="$("$COMMAND" widget --format swiftbar --cached 2>&1)"; then
   echo "AI error | color=red"

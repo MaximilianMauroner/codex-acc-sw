@@ -30,25 +30,16 @@ struct CLIRunner {
             : ["widget", "--format", "json", "--timeout", "8"]
         process.environment = augmentedEnvironment()
 
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outputData = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = error.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: errorData, encoding: .utf8) ?? ""
+        let result = try ProcessCapture.run(process, timeout: 30)
+        guard result.status == 0, !result.timedOut else {
+            let message = String(data: result.error, encoding: .utf8) ?? ""
             throw CLIRunnerError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
-            return try decoder.decode(UsagePayload.self, from: outputData)
+            return try decoder.decode(UsagePayload.self, from: result.output)
         } catch {
             throw CLIRunnerError.invalidOutput
         }

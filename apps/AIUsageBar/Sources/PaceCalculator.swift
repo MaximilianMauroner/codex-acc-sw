@@ -36,12 +36,7 @@ enum PaceCalculator {
             ?? windowBurnRate(snapshot: snapshot, period: period, secondsToReset: secondsToReset)
 
         guard let burnPerSecond else {
-            return PaceAssessment(
-                severity: .steady,
-                label: "Idle",
-                detail: "\(period.label) has no recent burn",
-                projectedRemaining: remaining
-            )
+            return .learning
         }
 
         let projectedRemaining = remaining - burnPerSecond * secondsToReset
@@ -83,7 +78,7 @@ enum PaceCalculator {
         let horizon: TimeInterval = period == .current ? 60 * 60 : 6 * 60 * 60
         let minimumSpan: TimeInterval = period == .current ? 5 * 60 : 20 * 60
         let cutoff = Date().addingTimeInterval(-horizon)
-        let recent = history
+        var recent = history
             .filter { $0.timestamp >= cutoff }
             .compactMap { sample -> (Date, Double)? in
                 let value: Double?
@@ -95,6 +90,18 @@ enum PaceCalculator {
                 return (sample.timestamp, value)
             }
             .sorted { $0.0 < $1.0 }
+
+        // A quota reset or upgrade starts a new observation series. Samples from
+        // the prior allowance cannot describe the current window's burn rate.
+        if recent.count > 1 {
+            var resetIndex: Int?
+            for index in 1..<recent.count where recent[index].1 > recent[index - 1].1 + 0.5 {
+                resetIndex = index
+            }
+            if let resetIndex {
+                recent = Array(recent[resetIndex...])
+            }
+        }
 
         guard let first = recent.first, let last = recent.last else {
             return nil

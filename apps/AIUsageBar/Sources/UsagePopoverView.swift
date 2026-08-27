@@ -1197,7 +1197,12 @@ private struct SummaryTile: View {
     @ObservedObject var store: UsageStore
 
     var body: some View {
-        let pace = store.worstPace(for: account)
+        let selection = BudgetPeriod.allCases
+            .map { period in (period, store.pace(for: account, period: period)) }
+            .max { $0.1.severity < $1.1.severity }
+        let period = selection?.0 ?? .current
+        let pace = selection?.1 ?? .learning
+        let remaining = account.snapshot.flatMap { period.remaining(in: $0) }
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Text(title)
@@ -1206,15 +1211,15 @@ private struct SummaryTile: View {
                 PaceBadge(assessment: pace)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(TimeText.percent(account.snapshot?.currentRemainingPercent))
+                Text(TimeText.percent(remaining))
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("5h")
+                Text(period.label)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             BudgetBar(
-                value: (account.snapshot?.currentRemainingPercent ?? 0) / 100,
+                value: (remaining ?? 0) / 100,
                 color: pace.severity.color
             )
             Text(pace.detail)

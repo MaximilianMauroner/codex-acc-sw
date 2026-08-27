@@ -15,6 +15,8 @@ final class UsageStore: ObservableObject {
     private var history = UsageHistory.load()
     private var liveRefreshInFlight = false
     private var costRefreshInFlight = false
+    private var refreshGeneration = 0
+    private var lastAppliedLiveGeneration = 0
 
     var codexAccounts: [UsageAccount] {
         payload?.accounts.filter { $0.isCodex } ?? []
@@ -59,11 +61,19 @@ final class UsageStore: ObservableObject {
             }
         }
 
+        refreshGeneration += 1
+        let generation = refreshGeneration
+
         DispatchQueue.global(qos: cached ? .utility : .userInitiated).async {
             do {
                 let payload = try self.runner.fetch(cached: cached)
                 DispatchQueue.main.async {
-                    self.apply(payload: payload)
+                    if !cached {
+                        self.lastAppliedLiveGeneration = generation
+                        self.apply(payload: payload)
+                    } else if generation > self.lastAppliedLiveGeneration {
+                        self.apply(payload: payload)
+                    }
                     if !cached {
                         self.isRefreshing = false
                         self.liveRefreshInFlight = false
