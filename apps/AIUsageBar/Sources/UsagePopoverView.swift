@@ -25,6 +25,9 @@ struct UsagePopoverView: View {
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
+                            if let error = store.errorMessage {
+                                LiveRefreshWarning(message: error)
+                            }
                             CostHistoryCard(store: store)
                             SummaryStrip(store: store)
                             AccountSection(
@@ -53,6 +56,34 @@ struct UsagePopoverView: View {
         }
         .frame(width: 440, height: 720)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct LiveRefreshWarning: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color(nsColor: .systemOrange))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Live refresh failed")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Showing cached usage. \(message)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: .systemOrange).opacity(0.1))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(nsColor: .systemOrange).opacity(0.45), lineWidth: 1)
+        )
     }
 }
 
@@ -519,6 +550,7 @@ private struct ActionsScreen: View {
             && !name.contains(":")
             && name != "."
             && name != ".."
+            && !["help", "-h", "--help"].contains(name.lowercased())
     }
 
     private func runCommand(

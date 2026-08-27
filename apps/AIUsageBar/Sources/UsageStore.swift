@@ -234,6 +234,15 @@ final class UsageStore: ObservableObject {
         let visibleClaudeAccount = workingClaudeAccount.flatMap { isTopBarVisible($0) ? $0 : nil }
         let title = titleText(codexAccounts: visibleCodexAccounts, claudeAccount: visibleClaudeAccount)
 
+        if let errorMessage {
+            statusSummary = StatusSummary(
+                title: "Warning \(title)",
+                tooltip: "Live refresh failed: \(errorMessage)",
+                severity: .critical
+            )
+            return
+        }
+
         let workingCandidates = workingCodexAccounts + [workingClaudeAccount].compactMap { $0 }
         let problemCandidates = [active, claude].compactMap { $0 }.filter { $0.hasProblem }
         let worst = workingCandidates

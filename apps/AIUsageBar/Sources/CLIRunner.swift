@@ -54,9 +54,11 @@ struct CLIRunner {
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ).filter { $0.lastPathComponent.hasSuffix(".auth.json") }.count) ?? 0
-        // The shell currently fetches Codex accounts and Claude sequentially.
-        // Cover every per-provider 8-second deadline plus process startup/output.
-        return max(30, TimeInterval(count + 1) * 8 + 10)
+        // A Codex account can refresh, request usage, then refresh and retry.
+        // Claude can spend one timeout on Keychain and another on HTTP.
+        let codexOperations = count * 4
+        let claudeOperations = 2
+        return max(30, TimeInterval(codexOperations + claudeOperations) * 8 + 10)
     }
 
     private func resolveCommand() -> String? {

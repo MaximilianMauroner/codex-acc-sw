@@ -26,6 +26,7 @@ CONFIG_FILE="${STATE_DIR}/config"
 USAGE_CACHE_DIR="${STATE_DIR}/usage-cache"
 USAGE_AUTO_REFRESH_TIMEOUT_SECONDS=3
 USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS=8
+AUTH_STORE_LOCK_DIR="${STATE_DIR}/auth-store.lock"
 
 # ------------- utils -------------
 die() { echo "[ERR] $*" >&2; exit 1; }
@@ -44,6 +45,47 @@ ensure_dirs() {
     "$STATE_DIR" \
     "$USAGE_CACHE_DIR/codex" \
     "$USAGE_CACHE_DIR/claude"
+}
+
+release_auth_store_lock() {
+  local owner_pid=""
+  if [[ -f "$AUTH_STORE_LOCK_DIR/pid" ]]; then
+    owner_pid="$(<"$AUTH_STORE_LOCK_DIR/pid")"
+  fi
+  [[ "$owner_pid" == "$$" ]] || return 0
+  rm -f "$AUTH_STORE_LOCK_DIR/pid"
+  rmdir "$AUTH_STORE_LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_auth_store_lock() {
+  local owner_pid stale_dir
+  while true; do
+    if mkdir "$AUTH_STORE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$AUTH_STORE_LOCK_DIR/pid"
+      trap release_auth_store_lock EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      return 0
+    fi
+
+    owner_pid=""
+    if [[ -f "$AUTH_STORE_LOCK_DIR/pid" ]]; then
+      owner_pid="$(<"$AUTH_STORE_LOCK_DIR/pid")"
+    else
+      sleep 0.05
+      [[ -f "$AUTH_STORE_LOCK_DIR/pid" ]] && owner_pid="$(<"$AUTH_STORE_LOCK_DIR/pid")"
+    fi
+    if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+      sleep 0.1
+      continue
+    fi
+
+    stale_dir="${AUTH_STORE_LOCK_DIR}.stale.$$"
+    if mv "$AUTH_STORE_LOCK_DIR" "$stale_dir" 2>/dev/null; then
+      rm -f "$stale_dir/pid"
+      rmdir "$stale_dir" 2>/dev/null || true
+    fi
+  done
 }
 
 load_state() {
@@ -116,11 +158,97 @@ if account_id:
 PY
 }
 
+auth_last_refresh_epoch() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import datetime as dt
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        value = json.load(handle).get("last_refresh")
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+    parsed = None
+print(parsed.timestamp() if parsed else 0)
+PY
+}
+
+atomic_copy_auth() {
+  local source="$1"
+  local destination="$2"
+  local destination_dir tmp
+  destination_dir="$(dirname -- "$destination")"
+  mkdir -p "$destination_dir"
+  tmp="$(mktemp "${destination_dir}/.auth-copy.XXXXXX")"
+  if ! cp "$source" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$destination"
+}
+
+copy_newer_matching_auth() {
+  local source="$1"
+  local destination="$2"
+  local source_account_id destination_account_id source_refresh destination_refresh
+  [[ -f "$source" ]] || return 1
+  if [[ ! -f "$destination" ]]; then
+    atomic_copy_auth "$source" "$destination"
+    return
+  fi
+  cmp -s "$source" "$destination" && return 0
+
+  source_account_id="$(account_id_for_auth_path "$source")"
+  destination_account_id="$(account_id_for_auth_path "$destination")"
+  [[ -n "${source_account_id:-}" && "$source_account_id" == "$destination_account_id" ]] || return 1
+
+  source_refresh="$(auth_last_refresh_epoch "$source")"
+  destination_refresh="$(auth_last_refresh_epoch "$destination")"
+  if python3 - "$source_refresh" "$destination_refresh" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)
+PY
+  then
+    atomic_copy_auth "$source" "$destination"
+  fi
+}
+
 account_identity_for_auth_path() {
   local account_id
   account_id="$(account_id_for_auth_path "$1")"
   [[ -n "${account_id:-}" ]] || return 0
   printf '%s' "$account_id" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
+claude_account_identity() {
+  local credential_service="${CODEX_ACCOUNT_SWITCH_CLAUDE_CREDENTIAL_SERVICE:-Claude Code-credentials}"
+  python3 - "${HOME}/.claude.json" "$credential_service" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+path, credential_service = sys.argv[1:]
+if not os.path.isfile(path):
+    raise SystemExit(0)
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        oauth_account = json.load(handle).get("oauthAccount")
+except (OSError, json.JSONDecodeError, AttributeError):
+    raise SystemExit(0)
+if not oauth_account:
+    raise SystemExit(0)
+identity_source = json.dumps(
+    {"credential_service": credential_service, "oauth_account": oauth_account},
+    sort_keys=True,
+    separators=(",", ":"),
+    ensure_ascii=False,
+)
+print(hashlib.sha256(identity_source.encode("utf-8")).hexdigest())
+PY
 }
 
 current_account_name_from_auth() {
@@ -382,15 +510,7 @@ sync_active_auth_to_saved_account() {
   [[ -f "$AUTH_FILE" ]] || return 0
   [[ -f "$dest" ]] || return 0
 
-  local live_account_id saved_account_id
-  live_account_id="$(account_id_for_auth_path "$AUTH_FILE")"
-  saved_account_id="$(account_id_for_auth_path "$dest")"
-  [[ -n "${live_account_id:-}" ]] || return 1
-  [[ -n "${saved_account_id:-}" ]] || return 1
-  [[ "$live_account_id" == "$saved_account_id" ]] || return 1
-
-  cp "$AUTH_FILE" "$dest"
-  chmod 600 "$dest"
+  copy_newer_matching_auth "$AUTH_FILE" "$dest"
 }
 
 format_usage_snapshot_json() {
@@ -741,8 +861,6 @@ import json
 import sys
 
 provider, name, is_active, status, message, stale, snapshot_raw, account_identity = sys.argv[1:]
-if not account_identity and provider == "claude":
-    account_identity = "default-keychain-profile"
 snapshot = None
 if snapshot_raw:
     try:
@@ -841,12 +959,13 @@ collect_codex_widget_lines() {
 collect_claude_widget_line() {
   local timeout_seconds="${1:-$USAGE_AUTO_REFRESH_TIMEOUT_SECONDS}"
   local mode="${2:-live}"
-  local result_json status message snapshot_json cached_snapshot_json cache_path
+  local result_json status message snapshot_json cached_snapshot_json cache_path account_identity
 
   cache_path="$(claude_usage_cache_path)"
+  account_identity="$(claude_account_identity)"
   if [[ "$mode" == "cached" ]]; then
     if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
-      append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$cached_snapshot_json"
+      append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$cached_snapshot_json" "$account_identity"
     else
       append_widget_state_line \
         "claude" \
@@ -854,7 +973,9 @@ collect_claude_widget_line() {
         "0" \
         "no_cache" \
         "No cached Claude usage yet. A background refresh is running." \
-        "0"
+        "0" \
+        "" \
+        "$account_identity"
     fi
     return 0
   fi
@@ -862,7 +983,7 @@ collect_claude_widget_line() {
   if result_json="$(fetch_claude_status_json "$timeout_seconds" 2>/dev/null)"; then
     snapshot_json="$(json_snapshot_value "$result_json")" || return 0
     write_usage_cache_snapshot "$(claude_usage_cache_path)" "$snapshot_json"
-    append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$snapshot_json"
+    append_widget_state_line "claude" "claude" "0" "ok" "" "0" "$snapshot_json" "$account_identity"
     return 0
   fi
 
@@ -872,9 +993,9 @@ collect_claude_widget_line() {
   [[ -n "${message:-}" ]] || message="Claude usage could not be fetched."
 
   if cached_snapshot_json="$(read_usage_cache_snapshot_json "$cache_path" 2>/dev/null)"; then
-    append_widget_state_line "claude" "claude" "0" "$status" "$message" "1" "$cached_snapshot_json"
+    append_widget_state_line "claude" "claude" "0" "$status" "$message" "1" "$cached_snapshot_json" "$account_identity"
   else
-    append_widget_state_line "claude" "claude" "0" "$status" "$message" "0"
+    append_widget_state_line "claude" "claude" "0" "$status" "$message" "0" "" "$account_identity"
   fi
 }
 
@@ -1788,7 +1909,17 @@ prompt_account_name() {
   local ans
   read -r -p "Enter a name for the CURRENT logged-in account (e.g., personal, work): " ans
   [[ -z "${ans:-}" ]] && die "Account name cannot be empty."
+  validate_account_name "$ans"
   echo "$ans"
+}
+
+validate_account_name() {
+  local name="$1"
+  case "$name" in
+    [Hh][Ee][Ll][Pp]|-[Hh]|--[Hh][Ee][Ll][Pp]) die "'${name}' is reserved and cannot be used as an account name." ;;
+  esac
+  [[ "$name" != */* && "$name" != *:* && "$name" != "." && "$name" != ".." ]] || \
+    die "Account names cannot contain '/' or ':' and cannot be '.' or '..'."
 }
 
 backup_current_to() {
@@ -1798,6 +1929,7 @@ backup_current_to() {
   assert_auth_present_or_hint
 
   local dest; dest="$(auth_path_for "$name")"
+  validate_account_name "$name"
   if [[ -f "$dest" ]] && ! auth_files_match "$AUTH_FILE" "$dest"; then
     die "A different saved account named '${name}' already exists. Choose a new name or rename/remove the existing account first."
   fi
@@ -1805,8 +1937,12 @@ backup_current_to() {
   if [[ "$quiet" != "1" ]]; then
     note "Saving current auth.json to ${dest}..."
   fi
-  cp "$AUTH_FILE" "$dest"
-  chmod 600 "$dest"
+  if [[ -f "$dest" ]]; then
+    copy_newer_matching_auth "$AUTH_FILE" "$dest" || \
+      die "A different saved account named '${name}' already exists. Choose a new name or rename/remove the existing account first."
+  else
+    atomic_copy_auth "$AUTH_FILE" "$dest"
+  fi
   if [[ "$quiet" != "1" ]]; then
     ok "Saved."
   fi
@@ -1822,8 +1958,7 @@ activate_saved_account() {
   fi
   mkdir -p "$CODEX_HOME"
   if [[ -f "$src" ]]; then
-    cp "$src" "$AUTH_FILE"
-    chmod 600 "$AUTH_FILE"
+    atomic_copy_auth "$src" "$AUTH_FILE"
     if [[ "$quiet" != "1" ]]; then
       ok "Activated ${AUTH_FILE}."
     fi
@@ -1939,6 +2074,7 @@ cmd_current() {
 
 cmd_save() {
   # Save only the currently logged-in account auth under a name.
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} save [NAME]
@@ -1970,6 +2106,7 @@ EOF
 
 cmd_add() {
   # Prepare for a new login without touching config, history, logs, or sessions.
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} add NAME
@@ -1999,6 +2136,7 @@ EOF
 
 cmd_switch() {
   # Switch to a saved account by swapping only auth.json.
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} switch NAME
@@ -2134,6 +2272,8 @@ EOF
 }
 
 cmd_rename() {
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
+  [[ -n "${2:-}" ]] && validate_account_name "$2"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} rename OLD_NAME NEW_NAME
@@ -2181,6 +2321,7 @@ EOF
 }
 
 cmd_remove() {
+  [[ -n "${1:-}" ]] && validate_account_name "$1"
   if is_help_flag "${1:-}"; then
     cat <<EOF
 Usage: ${COMMAND_NAME} remove NAME
@@ -2323,6 +2464,23 @@ main() {
 
   local cmd="${1:-help}"
   shift || true
+  local needs_auth_lock=0 arg
+  case "$cmd" in
+    status|list|current|refresh|save|add|switch|rename|remove|rm|delete)
+      needs_auth_lock=1
+      ;;
+    widget)
+      needs_auth_lock=1
+      for arg in "$@"; do
+        [[ "$arg" == "--cached" ]] && needs_auth_lock=0
+      done
+      ;;
+    *)
+      saved_account_exists "$cmd" && needs_auth_lock=1
+      ;;
+  esac
+  [[ "$needs_auth_lock" == "1" ]] && acquire_auth_store_lock
+
   case "$cmd" in
     status|list) cmd_list "$@";;
     current) cmd_current "$@";;
