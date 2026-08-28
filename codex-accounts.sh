@@ -588,15 +588,20 @@ consume_pending_active_sync() {
   marker_path="$(pending_active_sync_path)"
   [[ -f "$marker_path" ]] || return 0
   candidate_json="$(pending_active_sync_candidate_json)"
-  if [[ -n "$candidate_json" ]]; then
-    saved_path="$(json_field_value "$candidate_json" "saved_path")"
-    saved_digest="$(json_field_value "$candidate_json" "saved_digest")"
-    active_digest="$(json_field_value "$candidate_json" "active_digest")"
-    if [[ -n "$saved_path" && -n "$saved_digest" && -n "$active_digest" ]]; then
-      publish_auth_if_unchanged "$saved_path" "$AUTH_FILE" "$saved_digest" "$active_digest" || true
-    fi
+  if [[ -z "$candidate_json" ]]; then
+    rm -f "$marker_path"
+    return 0
   fi
-  rm -f "$marker_path"
+  saved_path="$(json_field_value "$candidate_json" "saved_path")"
+  saved_digest="$(json_field_value "$candidate_json" "saved_digest")"
+  active_digest="$(json_field_value "$candidate_json" "active_digest")"
+  if [[ -z "$saved_path" || -z "$saved_digest" || -z "$active_digest" ]]; then
+    rm -f "$marker_path"
+    return 0
+  fi
+  if publish_auth_if_unchanged "$saved_path" "$AUTH_FILE" "$saved_digest" "$active_digest"; then
+    rm -f "$marker_path"
+  fi
 }
 
 reconcile_refreshed_auth() {
@@ -635,12 +640,13 @@ reconcile_refreshed_auth() {
     [[ "$marker_written" == "1" ]] && rm -f "$marker_path"
     return 0
   fi
-  publish_auth_if_unchanged \
+  if publish_auth_if_unchanged \
     "$saved_auth_path" \
     "$AUTH_FILE" \
     "$expected_source_digest" \
-    "$active_baseline_digest" || true
-  rm -f "$marker_path"
+    "$active_baseline_digest"; then
+    rm -f "$marker_path"
+  fi
 }
 
 auth_owner_evidence_matches() {
@@ -974,6 +980,7 @@ import binascii
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -1224,30 +1231,66 @@ except json.JSONDecodeError:
         emit("invalid_response", "Claude usage API returned invalid JSON.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
     )
 
-if payload.get("error"):
+def invalid_usage_response(message):
     raise SystemExit(
-        emit("invalid_response", "Claude usage API returned an error payload.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
+        emit(
+            "invalid_response",
+            message,
+            account_identity=account_identity,
+            account_alias_hashes=account_alias_hashes,
+            organization_alias_hashes=organization_alias_hashes,
+            owner_evidence_state=owner_evidence_state,
+        )
     )
 
-five_hour = payload.get("five_hour") or {}
-seven_day = payload.get("seven_day") or {}
+
+if not isinstance(payload, dict):
+    invalid_usage_response("Claude usage API returned a non-object payload.")
+if payload.get("error"):
+    invalid_usage_response("Claude usage API returned an error payload.")
+
+
+def usage_period(name):
+    value = payload.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        invalid_usage_response(f"Claude usage payload field {name} must be an object or null.")
+    utilization = value.get("utilization")
+    normalized = dict(value)
+    if utilization is not None:
+        if isinstance(utilization, bool) or not isinstance(utilization, (int, float)):
+            invalid_usage_response(f"Claude usage payload field {name}.utilization must be a finite number or null.")
+        try:
+            utilization = float(utilization)
+        except (TypeError, ValueError, OverflowError):
+            invalid_usage_response(f"Claude usage payload field {name}.utilization must be a finite number or null.")
+        if not math.isfinite(utilization):
+            invalid_usage_response(f"Claude usage payload field {name}.utilization must be a finite number or null.")
+        normalized["utilization"] = utilization
+    resets_at = value.get("resets_at")
+    if resets_at is not None and not isinstance(resets_at, str):
+        invalid_usage_response(f"Claude usage payload field {name}.resets_at must be a string or null.")
+    return normalized
+
+
+five_hour = usage_period("five_hour")
+seven_day = usage_period("seven_day")
 five_hour_util = five_hour.get("utilization")
 seven_day_util = seven_day.get("utilization")
 
 if five_hour_util is None and seven_day_util is None:
-    raise SystemExit(
-        emit("invalid_response", "Claude usage payload has no utilization data.", account_identity=account_identity, account_alias_hashes=account_alias_hashes, organization_alias_hashes=organization_alias_hashes, owner_evidence_state=owner_evidence_state)
-    )
+    invalid_usage_response("Claude usage payload has no utilization data.")
 
 snapshot = {
     "last_seen_at": now_iso(),
     "plan_type": None,
     "current_remaining_percent": None
     if five_hour_util is None
-    else round(max(0.0, 100.0 - float(five_hour_util)), 1),
+    else round(max(0.0, 100.0 - five_hour_util), 1),
     "weekly_remaining_percent": None
     if seven_day_util is None
-    else round(max(0.0, 100.0 - float(seven_day_util)), 1),
+    else round(max(0.0, 100.0 - seven_day_util), 1),
     "current_window_minutes": 300.0,
     "weekly_window_minutes": 10080.0,
     "current_resets_at": five_hour.get("resets_at"),
@@ -1672,8 +1715,27 @@ json_field_json_value() {
 import json
 import sys
 
-data = json.loads(sys.argv[1])
-print(json.dumps(data.get(sys.argv[2]), separators=(",", ":")))
+field = sys.argv[2]
+array_fields = {
+    "account_identity_aliases",
+    "account_alias_hashes",
+    "organization_alias_hashes",
+}
+default = [] if field in array_fields else None
+try:
+    data = json.loads(sys.argv[1])
+except (json.JSONDecodeError, TypeError):
+    data = None
+if not isinstance(data, dict):
+    value = default
+else:
+    value = data.get(field, default)
+if field in array_fields:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        value = []
+elif field == "snapshot" and value is not None and not isinstance(value, dict):
+    value = None
+print(json.dumps(value, separators=(",", ":")))
 PY
 }
 

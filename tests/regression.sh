@@ -275,6 +275,106 @@ assert claude["status"] == "missing_token"
 PY
 done
 
+CLAUDE_HTTP_HOME="$TEST_HOME/claude-http-home"
+mkdir -p "$CLAUDE_HTTP_HOME/.codex/accounts" "$CLAUDE_HTTP_HOME/.codex/switch"
+cat >"$CLAUDE_HTTP_HOME/.codex/accounts/codex.auth.json" <<'EOF'
+{"tokens":{}}
+EOF
+cat >"$FAKE_BIN/security" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"accountUuid":"claude-http-owner","claudeAiOauth":{"accessToken":"fixture-token"}}'
+EOF
+chmod 755 "$FAKE_BIN/security"
+
+run_claude_http_fixture() {
+  local label="$1"
+  local payload="$2"
+  local expected_status="$3"
+  local response_file="$TEST_HOME/claude-http-$label.response"
+  local port_file="$TEST_HOME/claude-http-$label.port"
+  local output_file="$TEST_HOME/claude-http-$label.output"
+  local error_file="$TEST_HOME/claude-http-$label.error"
+  local server_pid port
+  printf '%s\n' "$payload" >"$response_file"
+  rm -f "$port_file"
+  python3 - "$response_file" "$port_file" <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys
+
+response_path, port_path = sys.argv[1:]
+with open(response_path, "rb") as handle:
+    body = handle.read()
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+server.timeout = 5
+with open(port_path, "w", encoding="utf-8") as handle:
+    handle.write(str(server.server_port))
+server.handle_request()
+PY
+  server_pid=$!
+  for _ in {1..500}; do
+    [[ -s "$port_file" ]] && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      wait "$server_pid" || true
+      fail "Claude HTTP fixture $label exited before publishing its port"
+    fi
+    sleep 0.01
+  done
+  [[ -s "$port_file" ]] || fail "Claude HTTP fixture $label did not publish its port"
+  port="$(<"$port_file")"
+  if ! HOME="$CLAUDE_HTTP_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    CODEX_ACCOUNT_SWITCH_CLAUDE_USAGE_URL="http://127.0.0.1:$port/usage" \
+    bash "$COMMAND" widget --format json --timeout 0.3 >"$output_file" 2>"$error_file"; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" || true
+    fail "Claude HTTP fixture $label aborted the widget"
+  fi
+  wait "$server_pid"
+  [[ ! -s "$error_file" ]] || fail "Claude HTTP fixture $label printed a traceback"
+  python3 - "$output_file" "$expected_status" "$label" <<'PY' || fail "Claude HTTP fixture $label was not provider-scoped"
+import json
+import sys
+
+path, expected, label = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as handle:
+    accounts = json.load(handle)["accounts"]
+assert any(account["provider"] == "codex" for account in accounts)
+claude = next(account for account in accounts if account["provider"] == "claude")
+assert claude["status"] == expected
+if expected == "ok":
+    assert claude["snapshot"]["current_remaining_percent"] == 75.0
+    assert claude["snapshot"]["weekly_remaining_percent"] == 50.0
+    assert claude["snapshot"]["current_resets_at"] == "2026-08-28T12:00:00Z"
+PY
+}
+
+run_claude_http_fixture top_array '[]' invalid_response
+run_claude_http_fixture top_null 'null' invalid_response
+run_claude_http_fixture top_string '"bad"' invalid_response
+run_claude_http_fixture top_number '42' invalid_response
+run_claude_http_fixture five_hour_array '{"five_hour":[],"seven_day":{"utilization":50}}' invalid_response
+run_claude_http_fixture seven_day_string '{"five_hour":{"utilization":25},"seven_day":"bad"}' invalid_response
+run_claude_http_fixture utilization_string '{"five_hour":{"utilization":"25"}}' invalid_response
+run_claude_http_fixture utilization_bool '{"five_hour":{"utilization":true}}' invalid_response
+run_claude_http_fixture utilization_infinite '{"five_hour":{"utilization":1e999}}' invalid_response
+huge_utilization="$(python3 -c 'print("1" + "0" * 400)')"
+run_claude_http_fixture utilization_huge_integer "{\"five_hour\":{\"utilization\":$huge_utilization}}" invalid_response
+run_claude_http_fixture reset_number '{"five_hour":{"utilization":25,"resets_at":123}}' invalid_response
+run_claude_http_fixture reset_array '{"five_hour":{"utilization":25},"seven_day":{"utilization":50,"resets_at":[]}}' invalid_response
+run_claude_http_fixture valid_usage '{"five_hour":{"utilization":25,"resets_at":"2026-08-28T12:00:00Z"},"seven_day":{"utilization":50,"resets_at":null}}' ok
+
 conflicting_claude_token="$(python3 - <<'PY'
 import base64
 import json
@@ -386,6 +486,14 @@ fi
   HOME="$TEST_HOME"
   # shellcheck source=../codex-accounts.sh
   source "$COMMAND"
+  [[ "$(json_field_json_value '[]' account_alias_hashes)" == "[]" ]] || \
+    fail "JSON field helper did not default an array field for a non-object result"
+  [[ "$(json_field_json_value '{invalid' organization_alias_hashes)" == "[]" ]] || \
+    fail "JSON field helper did not default an array field for invalid JSON"
+  [[ "$(json_field_json_value '{"account_alias_hashes":["ok",{}]}' account_alias_hashes)" == "[]" ]] || \
+    fail "JSON field helper accepted a non-string alias element"
+  [[ "$(json_field_json_value '"unexpected"' snapshot)" == "null" ]] || \
+    fail "JSON field helper did not default a snapshot for a non-object result"
   rotation_dir="$TEST_HOME/rotation-fixture"
   mkdir -p "$rotation_dir"
   cat >"$rotation_dir/saved.auth.json" <<EOF
@@ -528,6 +636,63 @@ EOF
   sync_active_auth_to_saved_account alpha || \
     fail "normal proven rotation left active refresh/name synchronization broken"
 
+  eval "$(declare -f publish_auth_if_unchanged | sed '1s/publish_auth_if_unchanged/real_publish_auth_if_unchanged/')"
+  force_active_publish_failure=1
+  publish_auth_if_unchanged() {
+    if [[ "$force_active_publish_failure" == "1" && "$2" == "$AUTH_FILE" ]]; then
+      return 1
+    fi
+    real_publish_auth_if_unchanged "$@"
+  }
+
+  cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
+  cp "$baseline_path" "$AUTH_FILE"
+  cp "$AUTH_FILE" "$active_baseline_path"
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  acquire_auth_store_lock
+  reconcile_refreshed_auth \
+    "$refreshed_path" \
+    "$DATA_DIR/alpha.auth.json" \
+    "$baseline_path" \
+    "$baseline_digest" \
+    1 \
+    "$active_baseline_path" || fail "active publish failure aborted saved reconciliation"
+  release_auth_store_lock
+  cmp -s "$refreshed_path" "$DATA_DIR/alpha.auth.json" || \
+    fail "active publish failure prevented saved publication"
+  cmp -s "$baseline_path" "$AUTH_FILE" || \
+    fail "active publish failure changed active credentials"
+  [[ -f "$(pending_active_sync_path)" ]] || \
+    fail "active publish failure discarded its pending marker"
+  force_active_publish_failure=0
+  [[ "$(current_account_name_from_auth)" == "alpha" ]] || \
+    fail "name detection did not retry a failed active publication"
+  cmp -s "$refreshed_path" "$AUTH_FILE" || \
+    fail "name detection retry did not repair active credentials"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "successful active publication retry left its pending marker"
+
+  cp "$baseline_path" "$AUTH_FILE"
+  cp "$refreshed_path" "$DATA_DIR/alpha.auth.json"
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  refreshed_digest="$(auth_file_digest "$refreshed_path")"
+  write_pending_active_sync "$DATA_DIR/alpha.auth.json" "$baseline_digest" "$refreshed_digest" || \
+    fail "consume retry fixture did not create its pending marker"
+  force_active_publish_failure=1
+  [[ -z "$(current_account_name_from_auth)" ]] || \
+    fail "failed marker consumption reported an active account"
+  [[ -f "$(pending_active_sync_path)" ]] || \
+    fail "consume-side CAS failure discarded its valid marker"
+  cmp -s "$baseline_path" "$AUTH_FILE" || \
+    fail "consume-side CAS failure changed active credentials"
+  force_active_publish_failure=0
+  [[ "$(current_account_name_from_auth)" == "alpha" ]] || \
+    fail "marker consumption did not retry after a transient CAS failure"
+  cmp -s "$refreshed_path" "$AUTH_FILE" || \
+    fail "consume-side CAS retry did not repair active credentials"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "consume-side CAS retry left its pending marker"
+
   cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
   cp "$baseline_path" "$AUTH_FILE"
   baseline_digest="$(auth_file_digest "$baseline_path")"
@@ -578,8 +743,11 @@ EOF
   release_auth_store_lock
   grep -q 'concurrent-login' "$AUTH_FILE" || \
     fail "proven rotation overwrote a concurrent active login"
+  [[ -f "$(pending_active_sync_path)" ]] || \
+    fail "failed concurrent active CAS discarded its pending marker too early"
+  current_account_name_from_auth >/dev/null || true
   [[ ! -e "$(pending_active_sync_path)" ]] || \
-    fail "concurrent active divergence left a pending sync marker"
+    fail "observed concurrent active divergence left a pending sync marker"
 
   rm -f "$DATA_DIR/beta.auth.json" "$(pending_active_sync_path)"
   cp "$refreshed_path" "$DATA_DIR/alpha.auth.json"
