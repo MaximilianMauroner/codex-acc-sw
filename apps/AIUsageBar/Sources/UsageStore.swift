@@ -9,6 +9,7 @@ final class UsageStore: ObservableObject {
     @Published private(set) var costErrorMessage: String?
     @Published private(set) var statusSummary = StatusSummary.loading
     @Published private var hiddenTopBarAccountIDs = TopBarPreferences.loadHiddenIDs()
+    private var consumedTopBarAliasIDs = TopBarPreferences.loadConsumedAliasIDs()
 
     private let runner = CLIRunner()
     private let costRunner = CostRunner()
@@ -31,13 +32,13 @@ final class UsageStore: ObservableObject {
     }
 
     var workingCodexAccounts: [UsageAccount] {
-        let working = orderedCodexAccounts.filter { hasTopBarBudget($0) }
+        let working = orderedCodexAccounts.filter { $0.status == "ok" && hasTopBarBudget($0) }
         let active = working.filter { $0.isActive }
         return active + working.filter { !$0.isActive }
     }
 
     var workingClaudeAccount: UsageAccount? {
-        guard let claudeAccount, hasTopBarBudget(claudeAccount) else {
+        guard let claudeAccount, claudeAccount.status == "ok", hasTopBarBudget(claudeAccount) else {
             return nil
         }
         return claudeAccount
@@ -229,10 +230,19 @@ final class UsageStore: ObservableObject {
     }
 
     private func migrateStableTopBarPreferences(accounts: [UsageAccount]) {
-        let migrated = TopBarPreferences.migratedHiddenIDs(hiddenTopBarAccountIDs, accounts: accounts)
-        guard migrated != hiddenTopBarAccountIDs else { return }
+        let originalHiddenIDs = hiddenTopBarAccountIDs
+        let originalConsumedAliases = consumedTopBarAliasIDs
+        let migrated = TopBarPreferences.migratedHiddenIDs(
+            hiddenTopBarAccountIDs,
+            accounts: accounts,
+            consumedAliasIDs: &consumedTopBarAliasIDs
+        )
+        guard migrated != originalHiddenIDs || consumedTopBarAliasIDs != originalConsumedAliases else {
+            return
+        }
         hiddenTopBarAccountIDs = migrated
         TopBarPreferences.saveHiddenIDs(hiddenTopBarAccountIDs)
+        TopBarPreferences.saveConsumedAliasIDs(consumedTopBarAliasIDs)
     }
 
     private func discardAmbiguousLegacyTopBarPreferences(accounts: [UsageAccount]) {
@@ -366,6 +376,7 @@ final class UsageStore: ObservableObject {
 
 enum TopBarPreferences {
     private static let hiddenIDsKey = "AIUsageBar.hiddenTopBarAccountIDs"
+    private static let consumedAliasIDsKey = "AIUsageBar.consumedTopBarAliasIDs"
 
     static func loadHiddenIDs() -> Set<String> {
         let values = UserDefaults.standard.stringArray(forKey: hiddenIDsKey) ?? []
@@ -376,21 +387,43 @@ enum TopBarPreferences {
         UserDefaults.standard.set(Array(ids).sorted(), forKey: hiddenIDsKey)
     }
 
-    static func migratedHiddenIDs(_ ids: Set<String>, accounts: [UsageAccount]) -> Set<String> {
-        let aliasCounts = accounts
-            .flatMap(\.preferenceAliasIDs)
-            .reduce(into: [String: Int]()) { counts, alias in
-                counts[alias, default: 0] += 1
+    static func loadConsumedAliasIDs() -> Set<String> {
+        let values = UserDefaults.standard.stringArray(forKey: consumedAliasIDsKey) ?? []
+        return Set(values)
+    }
+
+    static func saveConsumedAliasIDs(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: consumedAliasIDsKey)
+    }
+
+    static func migratedHiddenIDs(
+        _ ids: Set<String>,
+        accounts: [UsageAccount],
+        consumedAliasIDs: inout Set<String>
+    ) -> Set<String> {
+        let identityOccupants = accounts.flatMap { account in
+            [account.preferenceID].compactMap { $0 } + account.preferenceAliasIDs
+        }
+        let aliasCounts = identityOccupants
+            .reduce(into: [String: Int]()) { counts, identity in
+                counts[identity, default: 0] += 1
             }
         var result = ids
         for account in accounts {
             guard let preferenceID = account.preferenceID else { continue }
-            for aliasID in account.preferenceAliasIDs where aliasCounts[aliasID] == 1 {
-                if result.remove(aliasID) != nil {
+            for aliasID in account.preferenceAliasIDs
+                where !consumedAliasIDs.contains(aliasID) {
+                if aliasCounts[aliasID] == 1, result.remove(aliasID) != nil {
                     result.insert(preferenceID)
                 }
+                consumedAliasIDs.insert(aliasID)
             }
         }
         return result
+    }
+
+    static func migratedHiddenIDs(_ ids: Set<String>, accounts: [UsageAccount]) -> Set<String> {
+        var consumedAliasIDs: Set<String> = []
+        return migratedHiddenIDs(ids, accounts: accounts, consumedAliasIDs: &consumedAliasIDs)
     }
 }

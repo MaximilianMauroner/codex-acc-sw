@@ -95,6 +95,36 @@ final class PaceCalculatorTests: XCTestCase {
         XCTAssertNotNil(history.samplesByAccount[canonicalID])
     }
 
+    func testHistoryConsumesAliasOnlyOnceAcrossFutureSubjectReuse() {
+        let aliasID = "codex:legacy-subject"
+        let legacySample = HistorySample(
+            timestamp: Date().addingTimeInterval(-60),
+            currentRemaining: 95,
+            weeklyRemaining: nil
+        )
+        var history = UsageHistory(samplesByAccount: [aliasID: [legacySample]])
+        let canonical = makeAccount(
+            name: "upgraded",
+            identity: "strong-account",
+            aliases: ["legacy-subject"]
+        )
+
+        history.record(accounts: [canonical])
+        history.record(accounts: [makeAccount(name: "future", identity: "legacy-subject", aliases: [])])
+        history.record(accounts: [canonical])
+
+        XCTAssertEqual(history.samplesByAccount[aliasID]?.count, 1)
+        XCTAssertTrue(history.consumedAliasIDs.contains(aliasID))
+    }
+
+    func testLegacyHistoryWithoutConsumedAliasesStillDecodes() throws {
+        let data = Data(#"{"samplesByAccount":{}}"#.utf8)
+
+        let history = try JSONDecoder().decode(UsageHistory.self, from: data)
+
+        XCTAssertTrue(history.consumedAliasIDs.isEmpty)
+    }
+
     func testSharedSubjectAliasDoesNotMergeDifferentAccounts() {
         let legacyID = "codex:shared-subject"
         let legacySample = HistorySample(
@@ -111,6 +141,50 @@ final class PaceCalculatorTests: XCTestCase {
         XCTAssertEqual(history.samples(for: accountA).count, 1)
         XCTAssertEqual(history.samples(for: accountB).count, 1)
         XCTAssertEqual(history.samplesByAccount[legacyID]?.count, 1)
+    }
+
+    func testCanonicalOccupantMakesHistoryAliasAmbiguous() {
+        let provisionalID = "codex:legacy-subject"
+        let legacySample = HistorySample(
+            timestamp: Date().addingTimeInterval(-60),
+            currentRemaining: 95,
+            weeklyRemaining: nil
+        )
+        var history = UsageHistory(samplesByAccount: [provisionalID: [legacySample]])
+        let provisional = makeAccount(name: "legacy", identity: "legacy-subject", aliases: [])
+        let upgraded = makeAccount(name: "upgraded", identity: "strong-account", aliases: ["legacy-subject"])
+
+        history.record(accounts: [provisional, upgraded])
+        history.record(accounts: [upgraded])
+
+        XCTAssertNotNil(history.samplesByAccount[provisionalID])
+        XCTAssertEqual(history.samples(for: upgraded).count, 1)
+        XCTAssertTrue(history.consumedAliasIDs.contains(provisionalID))
+    }
+
+    func testErroredCanonicalConsumesHistoryAliasBeforeRecordingCanStart() {
+        let aliasID = "codex:legacy-subject"
+        let legacySample = HistorySample(
+            timestamp: Date().addingTimeInterval(-60),
+            currentRemaining: 95,
+            weeklyRemaining: nil
+        )
+        var history = UsageHistory(samplesByAccount: [aliasID: [legacySample]])
+        let erroredCanonical = makeAccount(
+            name: "upgraded",
+            identity: "strong-account",
+            aliases: ["legacy-subject"],
+            status: "fetch_failed"
+        )
+        let canonical = makeAccount(name: "upgraded", identity: "strong-account", aliases: ["legacy-subject"])
+
+        history.record(accounts: [erroredCanonical])
+        history.record(accounts: [makeAccount(name: "future", identity: "legacy-subject", aliases: [])])
+        history.record(accounts: [canonical])
+
+        XCTAssertEqual(history.samplesByAccount[aliasID]?.count, 1)
+        XCTAssertEqual(history.samples(for: canonical).count, 2)
+        XCTAssertTrue(history.consumedAliasIDs.contains(aliasID))
     }
 
     func testTopBarPreferenceMigrationRejectsAmbiguousAlias() {
@@ -132,6 +206,49 @@ final class PaceCalculatorTests: XCTestCase {
         XCTAssertEqual(migrated, Set(["codex:owner:strong-account"]))
     }
 
+    func testTopBarPreferenceConsumesAliasOnlyOnceAcrossFutureSubjectReuse() {
+        let aliasID = "codex:owner:legacy-subject"
+        let canonicalID = "codex:owner:strong-account"
+        let canonical = makeAccount(name: "upgraded", identity: "strong-account", aliases: ["legacy-subject"])
+        var consumedAliasIDs: Set<String> = []
+
+        var hiddenIDs = TopBarPreferences.migratedHiddenIDs(
+            [aliasID],
+            accounts: [canonical],
+            consumedAliasIDs: &consumedAliasIDs
+        )
+        hiddenIDs.insert(aliasID)
+        hiddenIDs = TopBarPreferences.migratedHiddenIDs(
+            hiddenIDs,
+            accounts: [canonical],
+            consumedAliasIDs: &consumedAliasIDs
+        )
+
+        XCTAssertEqual(hiddenIDs, Set([canonicalID, aliasID]))
+        XCTAssertEqual(consumedAliasIDs, Set([aliasID]))
+    }
+
+    func testTopBarPreferenceKeepsAliasHeldByCanonicalOccupant() {
+        let aliasID = "codex:owner:legacy-subject"
+        let provisional = makeAccount(name: "legacy", identity: "legacy-subject", aliases: [])
+        let upgraded = makeAccount(name: "upgraded", identity: "strong-account", aliases: ["legacy-subject"])
+
+        var consumedAliasIDs: Set<String> = []
+        var migrated = TopBarPreferences.migratedHiddenIDs(
+            [aliasID],
+            accounts: [provisional, upgraded],
+            consumedAliasIDs: &consumedAliasIDs
+        )
+        migrated = TopBarPreferences.migratedHiddenIDs(
+            migrated,
+            accounts: [upgraded],
+            consumedAliasIDs: &consumedAliasIDs
+        )
+
+        XCTAssertEqual(migrated, Set([aliasID]))
+        XCTAssertEqual(consumedAliasIDs, Set([aliasID]))
+    }
+
     private func makeSnapshot(now: Date, remaining: Double, reset: Date) -> UsageSnapshot {
         let formatter = ISO8601DateFormatter()
         return UsageSnapshot(
@@ -146,14 +263,19 @@ final class PaceCalculatorTests: XCTestCase {
         )
     }
 
-    private func makeAccount(name: String, identity: String, aliases: [String]) -> UsageAccount {
+    private func makeAccount(
+        name: String,
+        identity: String,
+        aliases: [String],
+        status: String = "ok"
+    ) -> UsageAccount {
         UsageAccount(
             provider: "codex",
             name: name,
             accountIdentity: identity,
             accountIdentityAliases: aliases,
             isActive: false,
-            status: "ok",
+            status: status,
             message: "",
             stale: false,
             snapshot: makeSnapshot(

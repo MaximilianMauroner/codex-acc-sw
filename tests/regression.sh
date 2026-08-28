@@ -69,19 +69,19 @@ EOF
 cat >"$TEST_HOME/.codex/accounts/legacy.auth.json" <<EOF
 {"tokens":{"id_token":"$subject_only_token","access_token":"$explicit_account_token"}}
 EOF
-read -r upgraded_identity upgraded_alias <<EOF
+read -r upgraded_identity upgraded_alias_count <<EOF
 $(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
 import json, sys
 items = json.load(sys.stdin)["accounts"]
 item = next(item for item in items if item["name"] == "legacy")
-print(item["account_identity"], item["account_identity_aliases"][0])
+print(item["account_identity"], len(item["account_identity_aliases"]))
 ')
 EOF
 expected_explicit_identity="$(printf explicit-owner-1 | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 [[ "$upgraded_identity" == "$expected_explicit_identity" ]] || \
   fail "a stronger legacy account claim did not become the canonical identity"
-[[ "$upgraded_alias" == "$legacy_identity" ]] || \
-  fail "a stronger legacy account claim omitted its subject migration alias"
+[[ "$upgraded_alias_count" == "0" ]] || \
+  fail "an unproven stronger claim exposed a subject migration alias"
 
 read -r account_alias_token url_alias_token <<EOF
 $(python3 - <<'PY'
@@ -148,16 +148,16 @@ EOF
 cat >"$TEST_HOME/.codex/accounts/shared-b.auth.json" <<EOF
 {"tokens":{"id_token":"$shared_subject_account_b"}}
 EOF
-read -r shared_identity_a shared_identity_b shared_aliases_equal <<EOF
+read -r shared_identity_a shared_identity_b shared_alias_count <<EOF
 $(HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json | python3 -c '
 import json, sys
 items = {item["name"]: item for item in json.load(sys.stdin)["accounts"]}
 a, b = items["shared-a"], items["shared-b"]
-print(a["account_identity"], b["account_identity"], a["account_identity_aliases"] == b["account_identity_aliases"])
+print(a["account_identity"], b["account_identity"], len(a["account_identity_aliases"]) + len(b["account_identity_aliases"]))
 ')
 EOF
 [[ "$shared_identity_a" != "$shared_identity_b" ]] || fail "different accounts sharing a subject reused one canonical identity"
-[[ "$shared_aliases_equal" == "True" ]] || fail "shared-subject fixture did not exercise ambiguous migration aliases"
+[[ "$shared_alias_count" == "0" ]] || fail "shared-subject accounts exposed unproven migration aliases"
 
 assert_malformed_auth_is_identityless() {
   local auth_json="$1"
@@ -175,6 +175,13 @@ assert_malformed_auth_is_identityless '[]'
 assert_malformed_auth_is_identityless '{"tokens":[]}'
 assert_malformed_auth_is_identityless '{"tokens":{"id_token":"e30.W10.x"}}'
 rm -f "$TEST_HOME/.codex/accounts/malformed.auth.json"
+
+for malformed_active_auth in '[]' 'false' '{"tokens":[]}' '{"tokens":"bad"}'; do
+  printf '%s\n' "$malformed_active_auth" >"$TEST_HOME/.codex/auth.json"
+  HOME="$TEST_HOME" bash "$COMMAND" widget --cached --format json >"$TEST_HOME/malformed-active.json" 2>"$TEST_HOME/malformed-active.err" || \
+    fail "malformed active auth aborted widget collection"
+  [[ ! -s "$TEST_HOME/malformed-active.err" ]] || fail "malformed active auth printed a traceback"
+done
 
 cp "$TEST_HOME/.codex/accounts/legacy.auth.json" "$TEST_HOME/.codex/auth.json"
 cache_key="$(printf legacy | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
@@ -247,6 +254,26 @@ assert claude["status"] == "missing_credentials"
 assert claude["snapshot"]["current_remaining_percent"] == 50
 PY
 [[ -f "$claude_cache" ]] || fail "Claude credential failure deleted a valid owner-bound cache"
+
+for malformed_credentials in '[]' '42' '{"claudeAiOauth":[]}' '{"claudeAiOauth":"bad"}'; do
+  cat >"$FAKE_BIN/security" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$malformed_credentials'
+EOF
+  chmod 755 "$FAKE_BIN/security"
+  HOME="$TEST_HOME" PATH="$FAKE_BIN:$PATH" bash "$COMMAND" widget --format json >"$TEST_HOME/claude-malformed.json" || \
+    fail "malformed Claude credentials aborted the full widget"
+  python3 - "$TEST_HOME/claude-malformed.json" <<'PY' || fail "malformed Claude credentials did not stay provider-scoped"
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    accounts = json.load(handle)["accounts"]
+assert any(account["provider"] == "codex" for account in accounts)
+claude = next(account for account in accounts if account["provider"] == "claude")
+assert claude["status"] == "missing_token"
+PY
+done
 
 conflicting_claude_token="$(python3 - <<'PY'
 import base64
@@ -367,10 +394,35 @@ EOF
   cat >"$rotation_dir/refreshed.auth.json" <<EOF
 {"last_refresh":"2026-08-27T01:00:00Z","tokens":{"id_token":"$subject_only_token","access_token":"$explicit_account_token","refresh_token":"new"}}
 EOF
-  copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" || \
+  cp "$rotation_dir/saved.auth.json" "$rotation_dir/baseline.auth.json"
+  baseline_digest="$(auth_file_digest "$rotation_dir/baseline.auth.json")"
+  copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" "$rotation_dir/baseline.auth.json" "$baseline_digest" || \
     fail "matching legacy credential rotation was discarded"
   grep -q '"refresh_token":"new"' "$rotation_dir/saved.auth.json" || \
     fail "matching legacy credential rotation was not reconciled"
+  read -r proven_identity proven_alias <<EOF
+$(account_identity_evidence_for_auth_path "$rotation_dir/refreshed.auth.json" | python3 -c 'import json,sys; value=json.load(sys.stdin); print(value["account_identity"], value["account_identity_aliases"][0])')
+EOF
+  [[ "$proven_identity" == "$expected_explicit_identity" ]] || \
+    fail "proven legacy rotation emitted the wrong canonical identity"
+  [[ "$proven_alias" == "$legacy_identity" ]] || \
+    fail "proven legacy rotation emitted the wrong provisional alias"
+
+  unrelated_strong_token="$(python3 - <<'PY'
+import base64
+import json
+
+def part(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+print(f"{part({'alg': 'none'})}.{part({'sub': 'legacy-owner-1', 'account_id': 'unrelated-owner'})}.x")
+PY
+)"
+  cat >"$rotation_dir/unrelated.auth.json" <<EOF
+{"tokens":{"id_token":"$unrelated_strong_token"}}
+EOF
+  unrelated_alias_count="$(account_identity_evidence_for_auth_path "$rotation_dir/unrelated.auth.json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["account_identity_aliases"]))')"
+  [[ "$unrelated_alias_count" == "0" ]] || fail "an unrelated strong account consumed another account's subject lineage"
 
   cat >"$rotation_dir/saved.auth.json" <<EOF
 {"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$shared_subject_account_a","refresh_token":"owner-a"}}
@@ -383,6 +435,47 @@ EOF
   fi
   grep -q '"refresh_token":"owner-a"' "$rotation_dir/saved.auth.json" || \
     fail "owner mismatch overwrote saved credentials"
+
+  cat >"$rotation_dir/baseline.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"baseline"}}
+EOF
+  cp "$rotation_dir/baseline.auth.json" "$rotation_dir/saved.auth.json"
+  changed_baseline_digest="$(auth_file_digest "$rotation_dir/baseline.auth.json")"
+  cat >"$rotation_dir/saved.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:30:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"changed-after-snapshot"}}
+EOF
+  if copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" "$rotation_dir/baseline.auth.json" "$changed_baseline_digest"; then
+    fail "legacy rotation overwrote a destination changed after its snapshot"
+  fi
+  grep -q 'changed-after-snapshot' "$rotation_dir/saved.auth.json" || \
+    fail "failed baseline validation changed the destination"
+
+  cp "$rotation_dir/baseline.auth.json" "$rotation_dir/saved.auth.json"
+  stale_baseline_digest="$(auth_file_digest "$rotation_dir/baseline.auth.json")"
+  cat >"$rotation_dir/baseline.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"mutated-baseline"}}
+EOF
+  if copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" "$rotation_dir/baseline.auth.json" "$stale_baseline_digest"; then
+    fail "legacy rotation accepted baseline bytes changed after digesting"
+  fi
+  grep -q '"refresh_token":"baseline"' "$rotation_dir/saved.auth.json" || \
+    fail "baseline mutation changed the destination"
+
+  cat >"$rotation_dir/baseline.auth.json" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"old"}}
+EOF
+  cp "$rotation_dir/baseline.auth.json" "$rotation_dir/saved.auth.json"
+  forced_failure_digest="$(auth_file_digest "$rotation_dir/baseline.auth.json")"
+  saved_lineage_file="$IDENTITY_LINEAGE_FILE"
+  IDENTITY_LINEAGE_FILE="$rotation_dir/lineage-write-failure"
+  mkdir "$IDENTITY_LINEAGE_FILE"
+  if copy_newer_matching_auth "$rotation_dir/refreshed.auth.json" "$rotation_dir/saved.auth.json" "$rotation_dir/baseline.auth.json" "$forced_failure_digest"; then
+    fail "legacy rotation succeeded when lineage publication failed"
+  fi
+  grep -q '"refresh_token":"old"' "$rotation_dir/saved.auth.json" || \
+    fail "lineage publication failure installed refreshed credentials"
+  IDENTITY_LINEAGE_FILE="$saved_lineage_file"
+
 )
 
 export CODEX_ACCOUNT_SWITCH_BIN=/bin/true

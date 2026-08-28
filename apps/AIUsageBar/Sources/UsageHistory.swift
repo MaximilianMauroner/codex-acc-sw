@@ -32,9 +32,37 @@ struct HistorySample: Codable, Identifiable {
 
 struct UsageHistory: Codable {
     private(set) var samplesByAccount: [String: [HistorySample]] = [:]
+    private(set) var consumedAliasIDs: Set<String> = []
 
-    init(samplesByAccount: [String: [HistorySample]] = [:]) {
+    init(
+        samplesByAccount: [String: [HistorySample]] = [:],
+        consumedAliasIDs: Set<String> = []
+    ) {
         self.samplesByAccount = samplesByAccount
+        self.consumedAliasIDs = consumedAliasIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case samplesByAccount
+        case consumedAliasIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        samplesByAccount = try container.decodeIfPresent(
+            [String: [HistorySample]].self,
+            forKey: .samplesByAccount
+        ) ?? [:]
+        consumedAliasIDs = try container.decodeIfPresent(
+            Set<String>.self,
+            forKey: .consumedAliasIDs
+        ) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(samplesByAccount, forKey: .samplesByAccount)
+        try container.encode(consumedAliasIDs, forKey: .consumedAliasIDs)
     }
 
     static func load() -> UsageHistory {
@@ -46,24 +74,34 @@ struct UsageHistory: Codable {
     }
 
     mutating func record(accounts: [UsageAccount]) {
-        let aliasCounts = accounts
-            .flatMap(\.historyAliasIDs)
-            .reduce(into: [String: Int]()) { counts, alias in
-                counts[alias, default: 0] += 1
+        let identityOccupants = accounts.flatMap { account in
+            [account.historyID].compactMap { $0 } + account.historyAliasIDs
+        }
+        let aliasCounts = identityOccupants
+            .reduce(into: [String: Int]()) { counts, identity in
+                counts[identity, default: 0] += 1
             }
         for account in accounts {
-            guard account.status == "ok", !account.stale, let snapshot = account.snapshot else {
-                continue
-            }
             guard let historyID = account.historyID else { continue }
             var samples = samplesByAccount[historyID] ?? []
-            for aliasID in account.historyAliasIDs where aliasCounts[aliasID] == 1 {
-                guard aliasID != historyID, let legacySamples = samplesByAccount.removeValue(forKey: aliasID) else {
-                    continue
+            var migratedLegacySamples = false
+            for aliasID in account.historyAliasIDs
+                where !consumedAliasIDs.contains(aliasID) {
+                if aliasCounts[aliasID] == 1,
+                   aliasID != historyID,
+                   let legacySamples = samplesByAccount.removeValue(forKey: aliasID) {
+                    samples.append(contentsOf: legacySamples)
+                    samples.sort { $0.timestamp < $1.timestamp }
+                    samples = Array(samples.suffix(240))
+                    migratedLegacySamples = true
                 }
-                samples.append(contentsOf: legacySamples)
-                samples.sort { $0.timestamp < $1.timestamp }
-                samples = Array(samples.suffix(240))
+                consumedAliasIDs.insert(aliasID)
+            }
+            if migratedLegacySamples {
+                samplesByAccount[historyID] = samples
+            }
+            guard account.status == "ok", !account.stale, let snapshot = account.snapshot else {
+                continue
             }
             let timestamp = snapshot.lastSeenDate ?? Date()
             let sample = HistorySample(

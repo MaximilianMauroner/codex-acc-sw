@@ -27,6 +27,7 @@ USAGE_CACHE_DIR="${STATE_DIR}/usage-cache"
 USAGE_AUTO_REFRESH_TIMEOUT_SECONDS=3
 USAGE_MANUAL_REFRESH_TIMEOUT_SECONDS=8
 AUTH_STORE_LOCK_DIR="${STATE_DIR}/auth-store.lock"
+IDENTITY_LINEAGE_FILE="${STATE_DIR}/identity-lineage.json"
 WIDGET_SNAPSHOT_DIR=""
 WIDGET_LINES_FILE=""
 WIDGET_PAYLOAD_FILE=""
@@ -174,7 +175,12 @@ try:
 except (OSError, json.JSONDecodeError):
     sys.exit(0)
 
-account_id = ((data.get("tokens") or {}).get("account_id") or "").strip()
+if not isinstance(data, dict):
+    sys.exit(0)
+tokens = data.get("tokens") or {}
+if not isinstance(tokens, dict):
+    sys.exit(0)
+account_id = str(tokens.get("account_id") or "").strip()
 if account_id:
     print(account_id)
 PY
@@ -212,10 +218,225 @@ atomic_copy_auth() {
   mv -f "$tmp" "$destination"
 }
 
+auth_file_digest() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        print(hashlib.sha256(handle.read()).hexdigest())
+except OSError:
+    pass
+PY
+}
+
+publish_auth_with_lineage() {
+  local source="$1"
+  local destination="$2"
+  local expected_source_digest="$3"
+  local expected_destination_digest="$4"
+  local canonical_identity="$5"
+  local provisional_identity="$6"
+  [[ -n "$canonical_identity" && -n "$provisional_identity" ]] || return 1
+  python3 - \
+    "$source" \
+    "$destination" \
+    "$expected_source_digest" \
+    "$expected_destination_digest" \
+    "$IDENTITY_LINEAGE_FILE" \
+    "$canonical_identity" \
+    "$provisional_identity" <<'PY'
+import hashlib
+import json
+import os
+import tempfile
+import sys
+
+source, destination, expected_source, expected_destination, path, canonical, provisional = sys.argv[1:]
+
+try:
+    with open(source, "rb") as handle:
+        source_bytes = handle.read()
+    with open(destination, "rb") as handle:
+        destination_bytes = handle.read()
+except OSError:
+    raise SystemExit(1)
+if hashlib.sha256(source_bytes).hexdigest() != expected_source:
+    raise SystemExit(1)
+if hashlib.sha256(destination_bytes).hexdigest() != expected_destination:
+    raise SystemExit(1)
+
+old_lineage = None
+try:
+    with open(path, "rb") as handle:
+        old_lineage = handle.read()
+    mappings = json.loads(old_lineage)
+except (OSError, json.JSONDecodeError):
+    mappings = {}
+if not isinstance(mappings, dict):
+    mappings = {}
+aliases = mappings.get(canonical, [])
+if not isinstance(aliases, list):
+    aliases = []
+mappings[canonical] = sorted(set(str(value) for value in aliases if value) | {provisional})
+os.makedirs(os.path.dirname(path), exist_ok=True)
+os.makedirs(os.path.dirname(destination), exist_ok=True)
+lineage_fd, lineage_temporary = tempfile.mkstemp(prefix=".identity-lineage.", dir=os.path.dirname(path))
+auth_fd, auth_temporary = tempfile.mkstemp(prefix=".auth-copy.", dir=os.path.dirname(destination))
+try:
+    with os.fdopen(lineage_fd, "w", encoding="utf-8") as handle:
+        json.dump(mappings, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+    with os.fdopen(auth_fd, "wb") as handle:
+        handle.write(source_bytes)
+    os.chmod(lineage_temporary, 0o600)
+    os.chmod(auth_temporary, 0o600)
+    os.replace(lineage_temporary, path)
+    try:
+        os.replace(auth_temporary, destination)
+    except OSError:
+        if old_lineage is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        else:
+            rollback_fd, rollback = tempfile.mkstemp(prefix=".identity-lineage.rollback.", dir=os.path.dirname(path))
+            try:
+                with os.fdopen(rollback_fd, "wb") as handle:
+                    handle.write(old_lineage)
+                os.chmod(rollback, 0o600)
+                os.replace(rollback, path)
+            finally:
+                try:
+                    os.unlink(rollback)
+                except FileNotFoundError:
+                    pass
+        raise
+finally:
+    for temporary in (lineage_temporary, auth_temporary):
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+PY
+}
+
+publish_auth_if_unchanged() {
+  local source="$1"
+  local destination="$2"
+  local expected_source_digest="$3"
+  local expected_destination_digest="$4"
+  python3 - "$source" "$destination" "$expected_source_digest" "$expected_destination_digest" <<'PY'
+import hashlib
+import os
+import tempfile
+import sys
+
+source, destination, expected_source, expected_destination = sys.argv[1:]
+try:
+    with open(source, "rb") as handle:
+        source_bytes = handle.read()
+    with open(destination, "rb") as handle:
+        destination_bytes = handle.read()
+except OSError:
+    raise SystemExit(1)
+if hashlib.sha256(source_bytes).hexdigest() != expected_source:
+    raise SystemExit(1)
+if hashlib.sha256(destination_bytes).hexdigest() != expected_destination:
+    raise SystemExit(1)
+
+fd, temporary = tempfile.mkstemp(prefix=".auth-copy.", dir=os.path.dirname(destination))
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(source_bytes)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+auth_transition_lineage() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import base64
+import binascii
+import hashlib
+import json
+import sys
+
+account_keys = ("account_id", "chatgpt_account_id", "https://api.openai.com/auth/chatgpt_account_id")
+
+def evidence(raw):
+    try:
+        auth = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(auth, dict) or not isinstance(auth.get("tokens") or {}, dict):
+        return None
+    tokens = auth.get("tokens") or {}
+    accounts, subjects = set(), set()
+    value = str(tokens.get("account_id") or "").strip()
+    if value:
+        accounts.add(value)
+    for name in ("id_token", "access_token"):
+        token = str(tokens.get(name) or "")
+        if token.count(".") < 2:
+            continue
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+            continue
+        if not isinstance(claims, dict):
+            continue
+        accounts.update(str(claims.get(key) or "").strip() for key in account_keys if str(claims.get(key) or "").strip())
+        subject = str(claims.get("sub") or "").strip()
+        if subject:
+            subjects.add(subject)
+    if len(accounts) > 1 or len(subjects) > 1:
+        return None
+    return accounts, subjects
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        before_bytes = handle.read()
+    with open(sys.argv[2], "rb") as handle:
+        after_bytes = handle.read()
+except OSError:
+    raise SystemExit(1)
+if hashlib.sha256(before_bytes).hexdigest() != sys.argv[3]:
+    raise SystemExit(1)
+before, after = evidence(before_bytes), evidence(after_bytes)
+if before is None or after is None:
+    raise SystemExit(1)
+before_accounts, before_subjects = before
+after_accounts, after_subjects = after
+if before_accounts:
+    raise SystemExit(1)
+if not before_subjects or before_subjects != after_subjects:
+    raise SystemExit(1)
+if after_accounts:
+    canonical = hashlib.sha256(next(iter(after_accounts)).encode("utf-8")).hexdigest()
+    subject = next(iter(before_subjects))
+    provisional = hashlib.sha256(f"claim:sub:{subject}".encode("utf-8")).hexdigest()
+    print(canonical, provisional, hashlib.sha256(after_bytes).hexdigest())
+else:
+    print("-", "-", hashlib.sha256(after_bytes).hexdigest())
+PY
+}
+
 copy_newer_matching_auth() {
   local source="$1"
   local destination="$2"
-  local source_refresh destination_refresh
+  local baseline_path="${3:-}"
+  local baseline_digest="${4:-}"
+  local source_refresh destination_refresh lineage=""
   [[ -f "$source" ]] || return 1
   if [[ ! -f "$destination" ]]; then
     atomic_copy_auth "$source" "$destination"
@@ -223,7 +444,10 @@ copy_newer_matching_auth() {
   fi
   cmp -s "$source" "$destination" && return 0
 
-  auth_owner_evidence_matches "$source" "$destination" || return 1
+  if ! auth_owner_evidence_matches "$source" "$destination"; then
+    [[ -n "$baseline_path" && -n "$baseline_digest" ]] || return 1
+    lineage="$(auth_transition_lineage "$baseline_path" "$source" "$baseline_digest")" || return 1
+  fi
 
   source_refresh="$(auth_last_refresh_epoch "$source")"
   destination_refresh="$(auth_last_refresh_epoch "$destination")"
@@ -232,7 +456,24 @@ import sys
 raise SystemExit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)
 PY
   then
-    atomic_copy_auth "$source" "$destination"
+    if [[ -n "$lineage" ]]; then
+      # The caller holds the auth-store lock while this mapping is updated.
+      local canonical_identity provisional_identity source_digest
+      read -r canonical_identity provisional_identity source_digest <<<"$lineage"
+      if [[ "$canonical_identity" == "-" ]]; then
+        publish_auth_if_unchanged "$source" "$destination" "$source_digest" "$baseline_digest"
+      else
+        publish_auth_with_lineage \
+          "$source" \
+          "$destination" \
+          "$source_digest" \
+          "$baseline_digest" \
+          "$canonical_identity" \
+          "$provisional_identity"
+      fi
+    else
+      atomic_copy_auth "$source" "$destination"
+    fi
   fi
 }
 
@@ -299,16 +540,17 @@ if source is None or destination is None:
     raise SystemExit(1)
 source_accounts, source_subjects = source
 destination_accounts, destination_subjects = destination
-if source_accounts and destination_accounts:
-    matches = bool(source_accounts.intersection(destination_accounts))
-else:
-    matches = bool(source_subjects and source_subjects == destination_subjects)
+matches = bool(
+    source_accounts
+    and destination_accounts
+    and source_accounts.intersection(destination_accounts)
+)
 raise SystemExit(0 if matches else 1)
 PY
 }
 
 account_identity_evidence_for_auth_path() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "$IDENTITY_LINEAGE_FILE" <<'PY'
 import base64
 import binascii
 import hashlib
@@ -321,7 +563,7 @@ def emit_empty():
     raise SystemExit(0)
 
 
-path = sys.argv[1]
+path, lineage_path = sys.argv[1:]
 if not os.path.isfile(path):
     emit_empty()
 try:
@@ -377,10 +619,16 @@ if len(account_claims) <= 1 and len(subject_claims) <= 1:
     elif account_claims:
         account_id = next(iter(account_claims))
         identity = hashlib.sha256(account_id.encode("utf-8")).hexdigest()
-        if subject_identity and subject_identity != identity:
-            aliases.append(subject_identity)
     else:
         identity = subject_identity
+if identity:
+    try:
+        with open(lineage_path, "r", encoding="utf-8") as handle:
+            mappings = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        mappings = {}
+    if isinstance(mappings, dict) and isinstance(mappings.get(identity), list):
+        aliases = sorted(set(str(value) for value in mappings[identity] if value and value != identity))
 print(json.dumps({
     "account_identity": identity,
     "account_identity_aliases": aliases,
@@ -745,9 +993,16 @@ except json.JSONDecodeError:
         emit("missing_token", "Claude Code credentials could not be parsed.", owner_evidence_state="invalid_credentials")
     )
 
-access_token = (
-    (credentials.get("claudeAiOauth") or {}).get("accessToken") or ""
-).strip()
+if not isinstance(credentials, dict):
+    raise SystemExit(
+        emit("missing_token", "Claude Code credentials must be a JSON object.", owner_evidence_state="invalid_credentials")
+    )
+oauth = credentials.get("claudeAiOauth") or {}
+if not isinstance(oauth, dict):
+    raise SystemExit(
+        emit("missing_token", "Claude Code OAuth credentials must be a JSON object.", owner_evidence_state="invalid_credentials")
+    )
+access_token = str(oauth.get("accessToken") or "").strip()
 if not access_token:
     raise SystemExit(
         emit("missing_token", "Claude Code access token is missing. Sign in again.", owner_evidence_state="invalid_credentials")
@@ -1314,7 +1569,7 @@ collect_codex_widget_lines() {
   local reconcile_saved_auth="${5:-0}"
 
   shopt -s nullglob
-  local f base auth_path saved_auth_path is_active account_identity account_identity_aliases_json identity_evidence_json result_json status message snapshot_json cached_snapshot_json cache_path
+  local f base auth_path saved_auth_path baseline_path baseline_digest is_active account_identity account_identity_aliases_json identity_evidence_json result_json status message snapshot_json cached_snapshot_json cache_path
   for f in "$auth_source_dir"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
@@ -1358,12 +1613,17 @@ collect_codex_widget_lines() {
     if [[ "$reconcile_saved_auth" == "1" ]]; then
       acquire_auth_store_lock
       saved_auth_path="$(auth_path_for "$base")"
-      if [[ -f "$saved_auth_path" ]] && copy_newer_matching_auth "$auth_path" "$saved_auth_path"; then
+      baseline_path="$auth_source_dir/.baselines/$base.auth.json"
+      baseline_digest="$(auth_file_digest "$baseline_path")"
+      if [[ -f "$saved_auth_path" ]] && copy_newer_matching_auth "$auth_path" "$saved_auth_path" "$baseline_path" "$baseline_digest"; then
         if [[ "$status" == "ok" ]]; then
           write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
         fi
       fi
       release_auth_store_lock
+      identity_evidence_json="$(account_identity_evidence_for_auth_path "$auth_path")"
+      account_identity="$(json_field_value "$identity_evidence_json" "account_identity")"
+      account_identity_aliases_json="$(json_field_json_value "$identity_evidence_json" "account_identity_aliases")"
     fi
 
     if [[ "$status" == "ok" ]]; then
@@ -1537,13 +1797,15 @@ build_widget_snapshot_json() {
   load_config
   if [[ "$mode" == "live" ]]; then
     snapshot_dir="$(mktemp -d)"
+    mkdir -p "$snapshot_dir/.baselines"
     WIDGET_SNAPSHOT_DIR="$snapshot_dir"
     acquire_auth_store_lock
     load_state
     active_current="$(resolved_current_account_name)"
     shopt -s nullglob
     for f in "$DATA_DIR"/*.auth.json; do
-      atomic_copy_auth "$f" "$snapshot_dir/$(basename -- "$f")"
+      atomic_copy_auth "$f" "$snapshot_dir/.baselines/$(basename -- "$f")"
+      atomic_copy_auth "$snapshot_dir/.baselines/$(basename -- "$f")" "$snapshot_dir/$(basename -- "$f")"
     done
     release_auth_store_lock
     auth_source_dir="$snapshot_dir"
