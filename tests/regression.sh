@@ -478,6 +478,137 @@ EOF
 
 )
 
+(
+  HOME="$TEST_HOME"
+  # shellcheck source=../codex-accounts.sh
+  source "$COMMAND"
+  recovery_root="$TEST_HOME/active-lineage-recovery"
+  CODEX_HOME="$recovery_root/.codex"
+  AUTH_FILE="$CODEX_HOME/auth.json"
+  DATA_DIR="$CODEX_HOME/accounts"
+  STATE_DIR="$CODEX_HOME/switch"
+  STATE_FILE="$STATE_DIR/state"
+  CONFIG_FILE="$STATE_DIR/config"
+  USAGE_CACHE_DIR="$STATE_DIR/usage-cache"
+  AUTH_STORE_LOCK_DIR="$STATE_DIR/auth-store.lock"
+  IDENTITY_LINEAGE_FILE="$STATE_DIR/identity-lineage.json"
+  ensure_dirs
+
+  baseline_path="$recovery_root/baseline.auth.json"
+  refreshed_path="$recovery_root/refreshed.auth.json"
+  active_baseline_path="$recovery_root/active-baseline.auth.json"
+  cat >"$baseline_path" <<EOF
+{"last_refresh":"2026-08-27T00:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"old"}}
+EOF
+  cat >"$refreshed_path" <<EOF
+{"last_refresh":"2026-08-27T01:00:00Z","tokens":{"id_token":"$subject_only_token","access_token":"$explicit_account_token","refresh_token":"new"}}
+EOF
+
+  cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
+  cp "$baseline_path" "$AUTH_FILE"
+  cp "$AUTH_FILE" "$active_baseline_path"
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  acquire_auth_store_lock
+  reconcile_refreshed_auth \
+    "$refreshed_path" \
+    "$DATA_DIR/alpha.auth.json" \
+    "$baseline_path" \
+    "$baseline_digest" \
+    1 \
+    "$active_baseline_path" || fail "normal proven rotation did not reconcile"
+  release_auth_store_lock
+  cmp -s "$refreshed_path" "$DATA_DIR/alpha.auth.json" || \
+    fail "normal proven rotation left saved credentials stale"
+  cmp -s "$refreshed_path" "$AUTH_FILE" || \
+    fail "normal proven rotation left active credentials stale"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "normal proven rotation left a pending active sync marker"
+  [[ "$(current_account_name_from_auth)" == "alpha" ]] || \
+    fail "normal proven rotation lost the active account name"
+  sync_active_auth_to_saved_account alpha || \
+    fail "normal proven rotation left active refresh/name synchronization broken"
+
+  cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
+  cp "$baseline_path" "$AUTH_FILE"
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  refreshed_digest="$(auth_file_digest "$refreshed_path")"
+  acquire_auth_store_lock
+  write_pending_active_sync "$DATA_DIR/alpha.auth.json" "$baseline_digest" "$refreshed_digest" || \
+    fail "interruption fixture did not create its pending sync marker"
+  copy_newer_matching_auth \
+    "$refreshed_path" \
+    "$DATA_DIR/alpha.auth.json" \
+    "$baseline_path" \
+    "$baseline_digest" \
+    "$refreshed_digest" || fail "interruption fixture did not publish saved credentials"
+  release_auth_store_lock
+  cmp -s "$baseline_path" "$AUTH_FILE" || \
+    fail "interruption fixture updated active credentials too early"
+  [[ "$(current_account_name_from_auth)" == "alpha" ]] || \
+    fail "pending sync recovery did not restore the active account name"
+  cmp -s "$refreshed_path" "$AUTH_FILE" || \
+    fail "pending sync recovery did not repair active credentials"
+
+  cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
+  cp "$baseline_path" "$AUTH_FILE"
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  write_pending_active_sync "$DATA_DIR/alpha.auth.json" "$baseline_digest" "$refreshed_digest" || \
+    fail "pre-publication crash fixture did not create its marker"
+  [[ "$(current_account_name_from_auth)" == "alpha" ]] || \
+    fail "pre-publication crash lost the unchanged byte-matched account"
+  cmp -s "$baseline_path" "$AUTH_FILE" || \
+    fail "pre-publication marker installed credentials absent from the saved account"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "pre-publication marker was not consumed after saved digest rejection"
+
+  cp "$baseline_path" "$DATA_DIR/alpha.auth.json"
+  cp "$baseline_path" "$active_baseline_path"
+  cat >"$AUTH_FILE" <<EOF
+{"last_refresh":"2026-08-27T02:00:00Z","tokens":{"id_token":"$shared_subject_account_b","refresh_token":"concurrent-login"}}
+EOF
+  baseline_digest="$(auth_file_digest "$baseline_path")"
+  acquire_auth_store_lock
+  reconcile_refreshed_auth \
+    "$refreshed_path" \
+    "$DATA_DIR/alpha.auth.json" \
+    "$baseline_path" \
+    "$baseline_digest" \
+    1 \
+    "$active_baseline_path" || fail "concurrent-change fixture did not reconcile saved credentials"
+  release_auth_store_lock
+  grep -q 'concurrent-login' "$AUTH_FILE" || \
+    fail "proven rotation overwrote a concurrent active login"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "concurrent active divergence left a pending sync marker"
+
+  rm -f "$DATA_DIR/beta.auth.json" "$(pending_active_sync_path)"
+  cp "$refreshed_path" "$DATA_DIR/alpha.auth.json"
+  cat >"$AUTH_FILE" <<EOF
+{"last_refresh":"2026-08-27T02:00:00Z","tokens":{"id_token":"$subject_only_token","refresh_token":"subject-owner-b"}}
+EOF
+  subject_b_before="$(auth_file_digest "$AUTH_FILE")"
+  [[ -z "$(current_account_name_from_auth)" ]] || \
+    fail "a sole canonical lineage alias claimed a later subject-only owner"
+  [[ "$(auth_file_digest "$AUTH_FILE")" == "$subject_b_before" ]] || \
+    fail "a sole canonical lineage alias overwrote a later subject-only owner"
+  printf '{bad marker\n' >"$(pending_active_sync_path)"
+  [[ -z "$(current_account_name_from_auth)" ]] || \
+    fail "a malformed pending marker selected an account"
+  [[ ! -e "$(pending_active_sync_path)" ]] || \
+    fail "a malformed pending marker was not removed"
+  [[ "$(auth_file_digest "$AUTH_FILE")" == "$subject_b_before" ]] || \
+    fail "a malformed pending marker rewrote active credentials"
+
+  cp "$baseline_path" "$AUTH_FILE"
+  cp "$refreshed_path" "$DATA_DIR/alpha.auth.json"
+  cp "$refreshed_path" "$DATA_DIR/beta.auth.json"
+  ambiguous_before="$(auth_file_digest "$AUTH_FILE")"
+  [[ -z "$(current_account_name_from_auth)" ]] || \
+    fail "multiple saved canonical files selected an ambiguous active account"
+  [[ "$(auth_file_digest "$AUTH_FILE")" == "$ambiguous_before" ]] || \
+    fail "multiple saved canonical files rewrote active credentials"
+)
+
 export CODEX_ACCOUNT_SWITCH_BIN=/bin/true
 # shellcheck source=../plugins/swiftbar/ai-usage.1m.sh
 original_home="$HOME"

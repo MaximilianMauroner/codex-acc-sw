@@ -31,6 +31,7 @@ IDENTITY_LINEAGE_FILE="${STATE_DIR}/identity-lineage.json"
 WIDGET_SNAPSHOT_DIR=""
 WIDGET_LINES_FILE=""
 WIDGET_PAYLOAD_FILE=""
+COPY_AUTH_PROVEN_TRANSITION=0
 
 # ------------- utils -------------
 die() { echo "[ERR] $*" >&2; exit 1; }
@@ -81,13 +82,16 @@ cleanup_widget_work_files() {
 }
 
 acquire_auth_store_lock() {
+  local trap_mode="${1:-install_traps}"
   local owner_pid stale_dir
   while true; do
     if mkdir "$AUTH_STORE_LOCK_DIR" 2>/dev/null; then
       printf '%s\n' "$$" > "$AUTH_STORE_LOCK_DIR/pid"
-      trap 'release_auth_store_lock; cleanup_widget_temporaries' EXIT
-      trap 'exit 130' INT
-      trap 'exit 143' TERM
+      if [[ "$trap_mode" == "install_traps" ]]; then
+        trap 'release_auth_store_lock; cleanup_widget_temporaries' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+      fi
       return 0
     fi
 
@@ -436,7 +440,9 @@ copy_newer_matching_auth() {
   local destination="$2"
   local baseline_path="${3:-}"
   local baseline_digest="${4:-}"
+  local expected_transition_source_digest="${5:-}"
   local source_refresh destination_refresh lineage=""
+  COPY_AUTH_PROVEN_TRANSITION=0
   [[ -f "$source" ]] || return 1
   if [[ ! -f "$destination" ]]; then
     atomic_copy_auth "$source" "$destination"
@@ -460,6 +466,9 @@ PY
       # The caller holds the auth-store lock while this mapping is updated.
       local canonical_identity provisional_identity source_digest
       read -r canonical_identity provisional_identity source_digest <<<"$lineage"
+      if [[ -n "$expected_transition_source_digest" && "$source_digest" != "$expected_transition_source_digest" ]]; then
+        return 1
+      fi
       if [[ "$canonical_identity" == "-" ]]; then
         publish_auth_if_unchanged "$source" "$destination" "$source_digest" "$baseline_digest"
       else
@@ -469,12 +478,169 @@ PY
           "$source_digest" \
           "$baseline_digest" \
           "$canonical_identity" \
-          "$provisional_identity"
+          "$provisional_identity" || return 1
+        COPY_AUTH_PROVEN_TRANSITION=1
       fi
     else
       atomic_copy_auth "$source" "$destination"
     fi
   fi
+}
+
+pending_active_sync_path() {
+  echo "$STATE_DIR/pending-active-sync.json"
+}
+
+write_pending_active_sync() {
+  local saved_auth_path="$1"
+  local old_digest="$2"
+  local new_digest="$3"
+  python3 - "$DATA_DIR" "$saved_auth_path" "$(pending_active_sync_path)" "$old_digest" "$new_digest" <<'PY'
+import json
+import os
+import re
+import tempfile
+import sys
+
+data_dir, saved_path, marker_path, old_digest, new_digest = sys.argv[1:]
+data_real = os.path.realpath(data_dir)
+saved_real = os.path.realpath(saved_path)
+if os.path.dirname(saved_real) != data_real or not saved_real.endswith(".auth.json"):
+    raise SystemExit(1)
+name = os.path.basename(saved_real)[:-len(".auth.json")]
+if not name or name.startswith(".") or "/" in name or ":" in name or name in (".", ".."):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{64}", old_digest) or not re.fullmatch(r"[0-9a-f]{64}", new_digest):
+    raise SystemExit(1)
+os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".pending-active-sync.", dir=os.path.dirname(marker_path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({
+            "saved_name": name,
+            "old_active_digest": old_digest,
+            "expected_new_digest": new_digest,
+        }, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, marker_path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+pending_active_sync_candidate_json() {
+  python3 - "$(pending_active_sync_path)" "$DATA_DIR" "$AUTH_FILE" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+
+marker_path, data_dir, active_path = sys.argv[1:]
+try:
+    with open(marker_path, "r", encoding="utf-8") as handle:
+        marker = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(marker, dict) or set(marker) != {
+    "saved_name", "old_active_digest", "expected_new_digest"
+}:
+    raise SystemExit(0)
+name = marker.get("saved_name")
+old_digest = marker.get("old_active_digest")
+new_digest = marker.get("expected_new_digest")
+if not isinstance(name, str) or not name or name.startswith(".") or "/" in name or ":" in name or name in (".", ".."):
+    raise SystemExit(0)
+if not isinstance(old_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", old_digest):
+    raise SystemExit(0)
+if not isinstance(new_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", new_digest):
+    raise SystemExit(0)
+data_real = os.path.realpath(data_dir)
+saved_path = os.path.join(data_real, f"{name}.auth.json")
+saved_real = os.path.realpath(saved_path)
+if os.path.dirname(saved_real) != data_real or os.path.basename(saved_real) != f"{name}.auth.json":
+    raise SystemExit(0)
+try:
+    with open(saved_real, "rb") as handle:
+        saved_bytes = handle.read()
+    with open(active_path, "rb") as handle:
+        active_bytes = handle.read()
+except OSError:
+    raise SystemExit(0)
+if hashlib.sha256(saved_bytes).hexdigest() != new_digest:
+    raise SystemExit(0)
+if hashlib.sha256(active_bytes).hexdigest() != old_digest:
+    raise SystemExit(0)
+print(json.dumps({
+    "saved_path": saved_real,
+    "saved_digest": new_digest,
+    "active_digest": old_digest,
+}, separators=(",", ":")))
+PY
+}
+
+consume_pending_active_sync() {
+  local marker_path candidate_json saved_path saved_digest active_digest
+  marker_path="$(pending_active_sync_path)"
+  [[ -f "$marker_path" ]] || return 0
+  candidate_json="$(pending_active_sync_candidate_json)"
+  if [[ -n "$candidate_json" ]]; then
+    saved_path="$(json_field_value "$candidate_json" "saved_path")"
+    saved_digest="$(json_field_value "$candidate_json" "saved_digest")"
+    active_digest="$(json_field_value "$candidate_json" "active_digest")"
+    if [[ -n "$saved_path" && -n "$saved_digest" && -n "$active_digest" ]]; then
+      publish_auth_if_unchanged "$saved_path" "$AUTH_FILE" "$saved_digest" "$active_digest" || true
+    fi
+  fi
+  rm -f "$marker_path"
+}
+
+reconcile_refreshed_auth() {
+  local source="$1"
+  local saved_auth_path="$2"
+  local baseline_path="$3"
+  local baseline_digest="$4"
+  local is_active="${5:-0}"
+  local active_baseline_path="${6:-}"
+  local active_baseline_digest transition canonical_identity provisional_identity expected_source_digest marker_path marker_written=0
+
+  marker_path="$(pending_active_sync_path)"
+  if [[ "$is_active" == "1" && -n "$active_baseline_path" ]]; then
+    active_baseline_digest="$(auth_file_digest "$active_baseline_path")"
+    if [[ -n "$active_baseline_digest" && "$active_baseline_digest" == "$baseline_digest" ]]; then
+      transition="$(auth_transition_lineage "$baseline_path" "$source" "$baseline_digest")" || transition=""
+      if [[ -n "$transition" ]]; then
+        read -r canonical_identity provisional_identity expected_source_digest <<<"$transition"
+        if [[ "$canonical_identity" != "-" ]]; then
+          write_pending_active_sync "$saved_auth_path" "$active_baseline_digest" "$expected_source_digest" || return 1
+          marker_written=1
+        fi
+      fi
+    fi
+  fi
+  if ! copy_newer_matching_auth \
+    "$source" \
+    "$saved_auth_path" \
+    "$baseline_path" \
+    "$baseline_digest" \
+    "${expected_source_digest:-}"; then
+    [[ "$marker_written" == "1" ]] && rm -f "$marker_path"
+    return 1
+  fi
+  if [[ "$marker_written" != "1" || "$COPY_AUTH_PROVEN_TRANSITION" != "1" ]]; then
+    [[ "$marker_written" == "1" ]] && rm -f "$marker_path"
+    return 0
+  fi
+  publish_auth_if_unchanged \
+    "$saved_auth_path" \
+    "$AUTH_FILE" \
+    "$expected_source_digest" \
+    "$active_baseline_digest" || true
+  rm -f "$marker_path"
 }
 
 auth_owner_evidence_matches() {
@@ -700,7 +866,12 @@ claude_account_identity() {
   json_field_value "$evidence" "account_identity"
 }
 
-current_account_name_from_auth() {
+auth_store_lock_held_by_current_process() {
+  [[ -f "$AUTH_STORE_LOCK_DIR/pid" && "$(<"$AUTH_STORE_LOCK_DIR/pid")" == "$$" ]]
+}
+
+current_account_name_from_auth_locked() {
+  consume_pending_active_sync
   [[ -f "$AUTH_FILE" ]] || return 0
 
   local live_account_id
@@ -724,6 +895,20 @@ current_account_name_from_auth() {
       return 0
     fi
   done
+
+}
+
+current_account_name_from_auth() {
+  if auth_store_lock_held_by_current_process; then
+    current_account_name_from_auth_locked
+    return
+  fi
+
+  local detected
+  acquire_auth_store_lock no_traps
+  detected="$(current_account_name_from_auth_locked)"
+  release_auth_store_lock
+  [[ -n "$detected" ]] && echo "$detected"
 }
 
 resolved_current_account_name() {
@@ -1569,7 +1754,7 @@ collect_codex_widget_lines() {
   local reconcile_saved_auth="${5:-0}"
 
   shopt -s nullglob
-  local f base auth_path saved_auth_path baseline_path baseline_digest is_active account_identity account_identity_aliases_json identity_evidence_json result_json status message snapshot_json cached_snapshot_json cache_path
+  local f base auth_path saved_auth_path baseline_path baseline_digest active_baseline_path is_active account_identity account_identity_aliases_json identity_evidence_json result_json status message snapshot_json cached_snapshot_json cache_path
   for f in "$auth_source_dir"/*.auth.json; do
     base="$(basename "$f")"
     base="${base%.auth.json}"
@@ -1615,7 +1800,14 @@ collect_codex_widget_lines() {
       saved_auth_path="$(auth_path_for "$base")"
       baseline_path="$auth_source_dir/.baselines/$base.auth.json"
       baseline_digest="$(auth_file_digest "$baseline_path")"
-      if [[ -f "$saved_auth_path" ]] && copy_newer_matching_auth "$auth_path" "$saved_auth_path" "$baseline_path" "$baseline_digest"; then
+      active_baseline_path="$auth_source_dir/.active-baseline.auth.json"
+      if [[ -f "$saved_auth_path" ]] && reconcile_refreshed_auth \
+        "$auth_path" \
+        "$saved_auth_path" \
+        "$baseline_path" \
+        "$baseline_digest" \
+        "$is_active" \
+        "$active_baseline_path"; then
         if [[ "$status" == "ok" ]]; then
           write_usage_cache_snapshot "$(usage_cache_path_for "$base")" "$snapshot_json"
         fi
@@ -1802,6 +1994,9 @@ build_widget_snapshot_json() {
     acquire_auth_store_lock
     load_state
     active_current="$(resolved_current_account_name)"
+    if [[ -f "$AUTH_FILE" ]]; then
+      atomic_copy_auth "$AUTH_FILE" "$snapshot_dir/.active-baseline.auth.json"
+    fi
     shopt -s nullglob
     for f in "$DATA_DIR"/*.auth.json; do
       atomic_copy_auth "$f" "$snapshot_dir/.baselines/$(basename -- "$f")"
