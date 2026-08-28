@@ -1,2 +1,7 @@
 .DS_Store
 codex-
+.build/
+build/
+apps/AIUsageBar/.build/
+__pycache__/
+*.py[cod]

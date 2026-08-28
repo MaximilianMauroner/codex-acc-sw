@@ -10,6 +10,8 @@
 - Shows both the 5-hour window reset and the weekly reset side by side
 - Color-codes usage percentages (green → yellow → red as budget depletes)
 - Optionally shows Claude Code usage in the same table (macOS, auto-detected)
+- Optional native SwiftUI menu-bar app with progress bars, pace projections, local sparklines, and cost history
+- Optional SwiftBar menu-bar widget for a script-only setup
 
 ## Quick start
 
@@ -68,10 +70,49 @@ The Claude section is fetched automatically from the Anthropic API using the Cla
 acc-sw configure show claude off
 ```
 
+## Optional native menu-bar app
+
+On macOS, build and install the SwiftUI menu-bar app:
+
+```bash
+make install PREFIX="$HOME/.local"
+make install-macos-menu-app PREFIX="$HOME/.local"
+make open-macos-menu-app
+```
+
+The native app runs as a menu-bar-only app. Its compact title shows each working plan's limiting budget, period, and reset shorthand, for example `chris wk26% 4d` or `claude 5h78% 4h`. Its SwiftUI popover shows active Codex and Claude summaries, per-account progress bars, reset times, projected pace, local usage sparklines, and a 30-day stacked cost chart with per-day hover breakdowns.
+
+Use the Settings screen to choose which working plans appear in the closed menu-bar title. Hidden plans remain visible inside the popover. A paid row without a stable account identity is always shown until the CLI can derive an ownership-safe preference key; Settings labels that exception instead of offering a toggle it cannot save.
+
+Use the Actions screen to switch Codex accounts, save the current login, prepare a new login, rename saved accounts, or remove inactive saved accounts. Claude auth is currently shown as storage information only; profile switching is not automated yet.
+
+The `x` button hides the popover. To quit the app, open the About screen from the header and use `Quit AI Usage Bar`.
+
+Cost history is powered by [context-bar](https://github.com/htahaozlu/context-bar). Install it once:
+
+```bash
+npm install -g context-bar
+```
+
+The app does not download or execute npm packages automatically. It uses an installed `context-bar` executable, or the executable selected by setting `CONTEXT_BAR_BIN=/path/to/context-bar` before launching the app.
+
+## Optional SwiftBar widget
+
+On macOS, install [SwiftBar](https://github.com/swiftbar/SwiftBar), then install the plugin:
+
+```bash
+brew install swiftbar
+make install PREFIX="$HOME/.local"
+make install-swiftbar-widget
+```
+
+`make install-swiftbar-widget` installs into SwiftBar's configured plugin folder when one is already set, otherwise it uses `~/SwiftBarPlugins`. The widget opens from cached usage immediately, warms a fresh snapshot in the background, and shows all saved Codex accounts plus Claude usage. The title and account rows are colored by projected burn pace: red if the current pace empties before reset, orange if it is tight, green if it is comfortably on track.
+
 ## Docs
 
 - [Installation](docs/installation.md)
 - [Usage](docs/usage.md)
+- [Claude auth notes](docs/claude-auth.md)
 
 ## Notes
 
